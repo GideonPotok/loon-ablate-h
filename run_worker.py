@@ -48,6 +48,8 @@ class _LogQueue:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker-id", type=int, required=True)
+    parser.add_argument("--max-episodes", type=int, default=0,
+                        help="Cap total episodes (0 = full run). Use for smoke tests.")
     args = parser.parse_args()
 
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,7 +58,7 @@ def main():
     q  = _LogQueue(args.worker_id)
     t0 = time.time()
 
-    worker_fn(args.worker_id, q)
+    worker_fn(args.worker_id, q, max_episodes=args.max_episodes)
 
     m, s  = divmod(int(time.time() - t0), 60)
     ckpt  = WEIGHTS_DIR / f"{WEIGHTS_PREFIX}_w{args.worker_id:02d}.pt"

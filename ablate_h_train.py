@@ -137,9 +137,11 @@ def _eval_multi_preset(agent: QRAgent, ep: int, seed: int,
 
 # ── Worker ────────────────────────────────────────────────────────────────────
 
-def worker_fn(worker_id: int, result_queue: mp.Queue):
+def worker_fn(worker_id: int, result_queue: mp.Queue, max_episodes: int = 0):
     seed = 42 + worker_id * 1_000_003
     config = replace(BASE_CONFIG, seed=seed)
+
+    n_eps = min(TOTAL_EPS, max_episodes) if max_episodes > 0 else TOTAL_EPS
 
     agent  = QRAgent(config)
     per_buf = PrioritizedReplayBuffer(
@@ -155,9 +157,9 @@ def worker_fn(worker_id: int, result_queue: mp.Queue):
     start_ts        = time.time()
 
     result_queue.put({'type': 'start', 'worker_id': worker_id, 'seed': seed,
-                      'total_episodes': TOTAL_EPS})
+                      'total_episodes': n_eps})
 
-    for ep in range(TOTAL_EPS):
+    for ep in range(n_eps):
         tier   = _tier_at(ep)
         preset = PRESETS[ep % len(PRESETS)]
         ep_seed = int(rng.integers(1_000_000_000))
@@ -180,7 +182,7 @@ def worker_fn(worker_id: int, result_queue: mp.Queue):
         env.close()
         agent.decay_epsilon()
 
-        if (ep + 1) % EVAL_EVERY == 0 or ep == TOTAL_EPS - 1:
+        if (ep + 1) % EVAL_EVERY == 0 or ep == n_eps - 1:
             ev = _eval_multi_preset(agent, ep, seed, EVAL_RUNS, EVAL_DURATION_S)
             new_best = ev['score'] > best_score
             if new_best:

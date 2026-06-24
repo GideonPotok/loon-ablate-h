@@ -1,0 +1,38 @@
+name: Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke (worker 0, 5 eps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Python deps
+        run: pip install torch numpy --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run smoke worker
+        run: python run_worker.py --worker-id 0 --max-episodes 5
+
+      - name: Collect results
+        run: python collect.py
+
+      - name: Upload smoke weights
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-weights
+          retention-days: 3
+          path: weights/
