@@ -1,0 +1,75 @@
+name: Train Ablation H
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    name: Worker ${{ matrix.worker_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    strategy:
+      matrix:
+        worker_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Python deps
+        run: pip install torch numpy --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run worker ${{ matrix.worker_id }}
+        run: python run_worker.py --worker-id ${{ matrix.worker_id }}
+
+      - name: Upload worker results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-${{ matrix.worker_id }}
+          path: |
+            weights/dqn_ablate_h_w${{ matrix.worker_id }}.pt
+            weights/dqn_ablate_h_w${{ matrix.worker_id }}.json
+
+  collect:
+    name: Collect & Pick Winner
+    needs: train
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python deps
+        run: pip install torch numpy --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download all worker artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+          merge-multiple: true
+
+      - name: Collect results and pick winner
+        run: python collect.py
+
+      - name: Upload final weights + summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-ablate-h
+          retention-days: 90
+          path: |
+            weights/dqn_ablate_h.pt
+            weights/dqn_ablate_h_summary.json
