@@ -37,8 +37,8 @@ jobs:
         with:
           name: worker-${{ matrix.worker_id }}
           path: |
-            weights/dqn_ablate_h_w${{ matrix.worker_id }}.pt
-            weights/dqn_ablate_h_w${{ matrix.worker_id }}.json
+            weights/dqn_ablate_h_w0${{ matrix.worker_id }}.pt
+            weights/dqn_ablate_h_w0${{ matrix.worker_id }}.json
 
   collect:
     name: Collect & Pick Winner
