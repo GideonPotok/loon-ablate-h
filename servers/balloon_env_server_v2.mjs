@@ -364,6 +364,10 @@ function handleReset(req) {
     const shapingBeta     = (req.shaping_beta != null) ? +req.shaping_beta : 0.5;
     const shapingGamma    = (req.shaping_gamma != null) ? +req.shaping_gamma : 0.97;
     const terminalTwrBonus = (req.terminal_twr_bonus != null) ? +req.terminal_twr_bonus : 50.0;
+    const shapingLinear   = !!req.shaping_linear;
+    const shapingDMax     = (req.shaping_D_max != null)
+        ? +req.shaping_D_max
+        : 10 * runtime.platform.STATION_RADIUS_M;   // 500 km default
 
     const layers = WIND_PRESETS[preset]?.layers;
     if (!layers) return { ok: false, error: `Unknown preset: ${preset}` };
@@ -434,6 +438,8 @@ function handleReset(req) {
             shapingBeta,
             shapingGamma,
             terminalTwrBonus,
+            shapingLinear,
+            shapingDMax,
         },
         prevDist: haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON),
     };
@@ -500,11 +506,18 @@ function handleStep(req) {
     // For the terminal state we follow Ng et al.: Φ(s_terminal) = 0, so on the last step
     // shaping reduces to F = -Φ(s) (still cheap to evaluate; preserves optimality).
     if (ep.flags.useShaping) {
-        const R       = runtime.platform.STATION_RADIUS_M;
-        const tau     = 2.0 * R;
-        const beta    = ep.flags.shapingBeta;
-        const phiPrev = beta * Math.exp(-ep.prevDist / tau);
-        const phiNext = done ? 0.0 : beta * Math.exp(-dist / tau);
+        const R    = runtime.platform.STATION_RADIUS_M;
+        const beta = ep.flags.shapingBeta;
+        let phiPrev, phiNext;
+        if (ep.flags.shapingLinear) {
+            const D = ep.flags.shapingDMax;
+            phiPrev = beta * Math.max(0, 1 - ep.prevDist / D);
+            phiNext = done ? 0.0 : beta * Math.max(0, 1 - dist / D);
+        } else {
+            const tau = 2.0 * R;
+            phiPrev = beta * Math.exp(-ep.prevDist / tau);
+            phiNext = done ? 0.0 : beta * Math.exp(-dist / tau);
+        }
         const shaping = ep.flags.shapingGamma * phiNext - phiPrev;
         reward += shaping;
     }
