@@ -1,4 +1,4 @@
-name: Train Ablation H
+name: Train Ablation J
 
 on:
   workflow_dispatch:
@@ -37,8 +37,8 @@ jobs:
         with:
           name: worker-${{ matrix.worker_id }}
           path: |
-            weights/dqn_ablate_h_w*.pt
-            weights/dqn_ablate_h_w*.json
+            weights/dqn_ablate_j_w*.pt
+            weights/dqn_ablate_j_w*.json
 
   collect:
     name: Collect & Pick Winner
@@ -68,8 +68,8 @@ jobs:
       - name: Upload final weights + summary
         uses: actions/upload-artifact@v4
         with:
-          name: final-ablate-h
+          name: final-ablate-j
           retention-days: 90
           path: |
-            weights/dqn_ablate_h.pt
-            weights/dqn_ablate_h_summary.json
+            weights/dqn_ablate_j.pt
+            weights/dqn_ablate_j_summary.json
