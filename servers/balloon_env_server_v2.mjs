@@ -496,15 +496,23 @@ function handleStep(req) {
     }
 
     // Potential-based reward shaping (Ng/Harada/Russell 1999) — Phase v2 step 4.
-    // Φ(s) = β · exp(-d/(2R)). Adds F = γ·Φ(s') − Φ(s), which is policy-invariant.
-    // For the terminal state we follow Ng et al.: Φ(s_terminal) = 0, so on the last step
-    // shaping reduces to F = -Φ(s) (still cheap to evaluate; preserves optimality).
+    // Linear:      Φ(s) = β · max(0, 1 − d/D_max)   (hard cutoff at D_max)
+    // Exponential: Φ(s) = β · exp(−d/τ)              (τ = shaping_D_max; fallback 2R)
+    // Adds F = γ·Φ(s') − Φ(s), which is policy-invariant.
+    // For the terminal state: Φ(s_terminal) = 0, so shaping reduces to F = −Φ(s).
     if (ep.flags.useShaping) {
-        const R       = runtime.platform.STATION_RADIUS_M;
-        const tau     = 2.0 * R;
-        const beta    = ep.flags.shapingBeta;
-        const phiPrev = beta * Math.exp(-ep.prevDist / tau);
-        const phiNext = done ? 0.0 : beta * Math.exp(-dist / tau);
+        const R    = runtime.platform.STATION_RADIUS_M;
+        const beta = ep.flags.shapingBeta;
+        let phiPrev, phiNext;
+        if (ep.flags.shapingLinear) {
+            const D = ep.flags.shapingDMax;
+            phiPrev = beta * Math.max(0, 1 - ep.prevDist / D);
+            phiNext = done ? 0.0 : beta * Math.max(0, 1 - dist / D);
+        } else {
+            const tau = ep.flags.shapingDMax || (2.0 * R);
+            phiPrev = beta * Math.exp(-ep.prevDist / tau);
+            phiNext = done ? 0.0 : beta * Math.exp(-dist / tau);
+        }
         const shaping = ep.flags.shapingGamma * phiNext - phiPrev;
         reward += shaping;
     }
