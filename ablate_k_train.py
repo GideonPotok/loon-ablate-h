@@ -98,8 +98,8 @@ BASE_CONFIG = QRConfig(
 )
 
 WEIGHTS_DIR    = Path(__file__).parent / 'weights'
-LOG_PATH       = Path('/tmp/train_ablate_k.log')
-WEIGHTS_PREFIX = 'dqn_ablate_k'
+LOG_PATH       = Path('/tmp/train_ablate_k2.log')
+WEIGHTS_PREFIX = 'dqn_ablate_k2'
 
 SHAPING_TAU_KM = 500.0  # exponential decay length scale
 
