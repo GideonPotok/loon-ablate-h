@@ -67,10 +67,30 @@ ABLATION_ENV_FLAGS = {
         'shaping_linear':     False,
         'shaping_D_max':      500_000.0,
     },
+    'm': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim (same as L)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
 }
 ABLATION_LABELS = {
     'k2': 'Ablation K2 (exp shaping, tau=500km)',
     'l':  'Ablation L (+ Fourier time features)',
+    'm':  'Ablation M (option-critic + GRU-64)',
+}
+# Architecture overrides not recoverable from the checkpoint's saved config
+# (QRAgent.state_dict() only persists the feedforward-relevant fields).
+ABLATION_AGENT_KWARGS = {
+    'm': {
+        'use_recurrent': True, 'use_options': True,
+        'n_options': 4, 'gru_hidden': 64,
+    },
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -81,7 +101,7 @@ def m_to_deg_lon(m, lat_deg=STATION_LAT):
     return m / (111_320 * math.cos(math.radians(lat_deg))) if lat_deg != 90 else 0
 
 
-def load_agent(weight_path: Path) -> QRAgent:
+def load_agent(weight_path: Path, agent_kwargs: dict | None = None) -> QRAgent:
     ckpt = torch.load(str(weight_path), map_location='cpu', weights_only=False)
     cfg_d = ckpt.get('config', {})
     config = QRConfig(
@@ -92,6 +112,7 @@ def load_agent(weight_path: Path) -> QRAgent:
         cvar_alpha   = cfg_d.get('cvar_alpha',   1.0),
         epsilon_end  = 0.0,   # greedy at eval
         device       = 'cpu',
+        **(agent_kwargs or {}),
     )
     agent = QRAgent(config)
     agent.policy_net.load_state_dict(ckpt['policy_net'])
@@ -104,6 +125,7 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
     """Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius."""
     env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
                      server_version=server_version, flags=flags)
+    agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
 
     traj = {k: [] for k in ('time_s', 'lat', 'lon', 'alt_m', 'dist_m', 'action', 'reward', 'in_radius')}
@@ -111,7 +133,7 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
     step = 0
 
     while not done:
-        action = agent.select_action(state)
+        action = agent.select_action(state, greedy=True)
         next_state, reward, done, info = env.step(action)
 
         time_s  = info.get('time_s',  step * 300)
@@ -281,7 +303,7 @@ def main():
     out_prefix     = args.out_prefix or (f'replay_ablate_{args.ablation}' if args.ablation else 'replay')
 
     print(f'Loading agent from {weight_path}')
-    agent = load_agent(weight_path)
+    agent = load_agent(weight_path, ABLATION_AGENT_KWARGS.get(args.ablation))
     agent.epsilon = 0.0
 
     presets = [args.preset] if args.preset else PRESETS

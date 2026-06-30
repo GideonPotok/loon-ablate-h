@@ -51,9 +51,32 @@ ENV_FLAGS = {
         'shaping_linear':     False,
         'shaping_D_max':      500_000.0,
     },
+    'm': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim (same as L)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
 }
 
-LABELS = {'k2': 'Ablation K2 (exp shaping, tau=500km)', 'l': 'Ablation L (+ Fourier time features)'}
+LABELS = {
+    'k2': 'Ablation K2 (exp shaping, tau=500km)',
+    'l':  'Ablation L (+ Fourier time features)',
+    'm':  'Ablation M (option-critic + GRU-64)',
+}
+# Architecture overrides not recoverable from the checkpoint's saved config
+# (QRAgent.state_dict() only persists the feedforward-relevant fields).
+AGENT_KWARGS = {
+    'm': {
+        'use_recurrent': True, 'use_options': True,
+        'n_options': 4, 'gru_hidden': 64,
+    },
+}
 
 
 def m_to_deg_lat(m): return m / 111_320
@@ -61,7 +84,7 @@ def m_to_deg_lon(m, lat=0.0):
     return m / (111_320 * math.cos(math.radians(lat)))
 
 
-def load_agent(weight_path: Path) -> QRAgent:
+def load_agent(weight_path: Path, agent_kwargs: dict | None = None) -> QRAgent:
     ckpt = torch.load(str(weight_path), map_location='cpu', weights_only=False)
     cfg_d = ckpt.get('config', {})
     config = QRConfig(
@@ -72,6 +95,7 @@ def load_agent(weight_path: Path) -> QRAgent:
         cvar_alpha   = cfg_d.get('cvar_alpha',   1.0),
         epsilon_end  = 0.0,
         device       = 'cpu',
+        **(agent_kwargs or {}),
     )
     agent = QRAgent(config)
     agent.policy_net.load_state_dict(ckpt['policy_net'])
@@ -82,12 +106,13 @@ def load_agent(weight_path: Path) -> QRAgent:
 def run_episode(agent, preset, duration_s, seed, flags):
     env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
                      server_version='v2', flags=flags)
+    agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
     traj = {k: [] for k in ('time_h', 'lat', 'lon', 'alt_m', 'dist_km', 'in_radius', 'reward')}
     done = False
     step = 0
     while not done:
-        action = agent.select_action(state)
+        action = agent.select_action(state, greedy=True)
         next_state, reward, done, info = env.step(action)
         traj['time_h'].append(info.get('time_s', step * 300) / 3600)
         traj['lat'].append(info.get('lat', STATION_LAT))
@@ -261,7 +286,7 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ablation', required=True, choices=['k2', 'l'])
+    parser.add_argument('--ablation', required=True, choices=sorted(ENV_FLAGS))
     parser.add_argument('--weight', required=True)
     parser.add_argument('--out-dir', default='.')
     parser.add_argument('--seed', type=int, default=42)
@@ -273,7 +298,7 @@ def main():
     out_dir = Path(args.out_dir)
 
     print(f'Loading agent from {args.weight}')
-    agent = load_agent(Path(args.weight))
+    agent = load_agent(Path(args.weight), AGENT_KWARGS.get(args.ablation))
 
     for preset in ['calm', 'tropical', 'strong-shear']:
         print(f'\nRunning {preset}...')
