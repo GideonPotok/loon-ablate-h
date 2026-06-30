@@ -294,7 +294,7 @@ class QRAgent:
                 q = self.policy_net(x).squeeze(0)   # (A, N)
         return self._cvar_of_q(q)
 
-    def _select_action_options(self, state: np.ndarray) -> int:
+    def _select_action_options(self, state: np.ndarray, greedy: bool = False) -> int:
         """Option-Critic action selection: terminate→reselect ω, then sample a∼π_ω."""
         c = self.config
         x = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -312,7 +312,7 @@ class QRAgent:
 
         if self._current_option is None:
             # Episode start: pick greedy option (with ε-exploration over options).
-            if self.rng.random() < self.epsilon:
+            if not greedy and self.rng.random() < self.epsilon:
                 self._current_option = int(self.rng.integers(c.n_options))
             else:
                 self._current_option = int(v_omega.argmax().item())
@@ -321,7 +321,7 @@ class QRAgent:
             b = float(bet[self._current_option].item())
             if self.rng.random() < b:
                 # Terminated → pick new option (greedy, with ε-exploration).
-                if self.rng.random() < self.epsilon:
+                if not greedy and self.rng.random() < self.epsilon:
                     self._current_option = int(self.rng.integers(c.n_options))
                 else:
                     self._current_option = int(v_omega.argmax().item())
@@ -331,12 +331,13 @@ class QRAgent:
         probs /= probs.sum()
         return int(self.rng.choice(c.action_count, p=probs))
 
-    def select_action(self, state: np.ndarray) -> int:
+    def select_action(self, state: np.ndarray, greedy: bool = False) -> int:
+        """greedy=True suppresses ε-exploration entirely — use for eval, never for training rollouts."""
         if self.config.use_recurrent and self._inference_hidden is None:
             self.reset_hidden()
         if self.config.use_options:
-            return self._select_action_options(state)
-        if self.rng.random() < self.epsilon:
+            return self._select_action_options(state, greedy=greedy)
+        if not greedy and self.rng.random() < self.epsilon:
             # Even on a random action we must advance the recurrent state.
             if self.config.use_recurrent:
                 _ = self._q_values(state)

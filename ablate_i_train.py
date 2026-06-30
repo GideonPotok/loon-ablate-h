@@ -139,7 +139,7 @@ def _eval_multi_preset(agent: QRAgent, ep: int, seed: int,
             done = False
             twr50 = 0.0
             while not done:
-                action = agent.select_action(state)
+                action = agent.select_action(state, greedy=True)
                 state, _, done, info = env.step(action)
                 twr50 = info.get('twr50', twr50)
             scores.append(twr50)
