@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 
 WEIGHTS_DIR    = Path(__file__).parent / "weights"
-WEIGHTS_PREFIX = "dqn_ablate_k2"
+WEIGHTS_PREFIX = "dqn_ablate_m"
 
 
 def main():
@@ -54,7 +54,7 @@ def main():
     shutil.copy2(winner_src, winner_dst)
 
     summary = {
-        "ablation":          "K2_exp_shaping_fixed",
+        "ablation":          "M_option_critic_gru",
         "winner_worker":     winner["worker_id"],
         "best_score":        winner["best_score"],
         "best_episode":      winner["best_episode"],

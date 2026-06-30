@@ -1,4 +1,4 @@
-name: Train Ablation K2 (exp shaping fixed)
+name: Train Ablation M
 
 on:
   workflow_dispatch:
@@ -37,8 +37,8 @@ jobs:
         with:
           name: worker-${{ matrix.worker_id }}
           path: |
-            weights/dqn_ablate_k2_w*.pt
-            weights/dqn_ablate_k2_w*.json
+            weights/dqn_ablate_m_w*.pt
+            weights/dqn_ablate_m_w*.json
 
   collect:
     name: Collect & Pick Winner
@@ -68,8 +68,8 @@ jobs:
       - name: Upload final weights + summary
         uses: actions/upload-artifact@v4
         with:
-          name: final-ablate-k2
+          name: final-ablate-m
           retention-days: 90
           path: |
-            weights/dqn_ablate_k2.pt
-            weights/dqn_ablate_k2_summary.json
+            weights/dqn_ablate_m.pt
+            weights/dqn_ablate_m_summary.json
