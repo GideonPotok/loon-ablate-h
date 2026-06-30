@@ -58,6 +58,7 @@ class QRConfig:
     seed:              int   = 42
     device:            str   = 'cpu'
     train_batches_per_step: int = 2
+    grad_clip_norm:    Optional[float] = None  # clip ||grad|| before optimizer.step(); None = off
 
     # ── Phase 2-v2 feature flags ─────────────────────────────────────────────
     # All default to False so existing training behaviour is unchanged.
@@ -346,6 +347,10 @@ class QRAgent:
 
     # ── Training ──────────────────────────────────────────────────────────────
 
+    def _clip_grad(self) -> None:
+        if self.config.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.config.grad_clip_norm)
+
     def train_batch(self, replay_buffer: PrioritizedReplayBuffer) -> Optional[float]:
         c = self.config
         if len(replay_buffer) < c.batch_size:
@@ -387,6 +392,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         replay_buffer.update_priorities(indices, per_sample_loss.detach().cpu().numpy())
@@ -477,6 +483,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         loss_val = float(loss.item())
@@ -636,6 +643,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         loss_val = float(loss.item())
