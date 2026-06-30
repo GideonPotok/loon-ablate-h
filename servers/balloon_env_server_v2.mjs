@@ -358,11 +358,14 @@ function handleReset(req) {
     const spawnOffsetKm = (req.spawn_offset_km != null) ? +req.spawn_offset_km : SPAWN_OFFSET_KM;
 
     // ── v2 feature flags (passed per-episode from the Python trainer) ────────
-    const useRewardFix    = !!req.use_reward_fix;
-    const useShaping      = !!req.use_shaping;
-    const useExpandedState = !!req.use_expanded_state;  // wired in step 5
-    const shapingBeta     = (req.shaping_beta != null) ? +req.shaping_beta : 0.5;
-    const shapingGamma    = (req.shaping_gamma != null) ? +req.shaping_gamma : 0.97;
+    const useRewardFix     = !!req.use_reward_fix;
+    const useShaping       = !!req.use_shaping;
+    const useExpandedState = !!req.use_expanded_state;
+    const useTimeFeatures  = !!req.use_time_features;   // append 4 Fourier scalars → +4 dim
+    const shapingBeta      = (req.shaping_beta   != null) ? +req.shaping_beta   : 0.5;
+    const shapingGamma     = (req.shaping_gamma  != null) ? +req.shaping_gamma  : 0.97;
+    const shapingLinear    = !!req.shaping_linear;
+    const shapingDMax      = (req.shaping_D_max  != null) ? +req.shaping_D_max  : 500_000;
     const terminalTwrBonus = (req.terminal_twr_bonus != null) ? +req.terminal_twr_bonus : 50.0;
 
     const layers = WIND_PRESETS[preset]?.layers;
@@ -431,18 +434,25 @@ function handleReset(req) {
             useRewardFix,
             useShaping,
             useExpandedState,
+            useTimeFeatures,
             shapingBeta,
             shapingGamma,
+            shapingLinear,
+            shapingDMax,
             terminalTwrBonus,
         },
         prevDist: haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON),
     };
 
     const dist    = haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON);
-    const statVec = useExpandedState
+    let statVec = useExpandedState
         ? extractStateV2(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON,
                          uncertaintyFn, 0, ep.totalPhysics, 0, dist /* prevDist == dist on reset */)
         : extractState(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON, uncertaintyFn);
+    if (ep.flags.useTimeFeatures) {
+        // time_s=0 on reset: sin(0)=0, cos(0)=1 for both periods — correct initial phase.
+        statVec = [...statVec, 0, 1, 0, 1];
+    }
 
     return {
         ok: true,
@@ -519,7 +529,7 @@ function handleStep(req) {
 
     // Build the state vector first — v2 expanded state needs ep.prevDist (the
     // previous step's distance), which we have not yet overwritten.
-    const stateVec = ep.flags.useExpandedState
+    let stateVec = ep.flags.useExpandedState
         ? extractStateV2(
             balloon, sensing.bestWindFn, time_s,
             ep.targetLat, ep.targetLon, sensing.uncertaintyFn,
@@ -529,6 +539,17 @@ function handleStep(req) {
             balloon, sensing.bestWindFn, time_s,
             ep.targetLat, ep.targetLon, sensing.uncertaintyFn,
           );
+    if (ep.flags.useTimeFeatures) {
+        const IGW_S = 28800;    // 8h IGW period
+        const PW_S  = 432000;   // 5-day planetary wave period
+        stateVec = [
+            ...stateVec,
+            Math.sin(2 * Math.PI * time_s / IGW_S),
+            Math.cos(2 * Math.PI * time_s / IGW_S),
+            Math.sin(2 * Math.PI * time_s / PW_S),
+            Math.cos(2 * Math.PI * time_s / PW_S),
+        ];
+    }
 
     // Now update prevDist for next-step shaping / diagnostics.
     ep.prevDist = dist;
