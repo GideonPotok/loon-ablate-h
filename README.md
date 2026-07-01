@@ -1,5 +1,13 @@
 # Ablation H — Extended DQN Training for Stratospheric Balloon Station-Keeping
 
+> **Looking for the pipeline, not one ablation?** See [`docs/`](docs/README.md)
+> for how an ablation gets delivered end to end (ideation → implementation →
+> CI → collection → PNG/GIF artifacts), the right way vs. observed pitfalls,
+> the branching model, and a proposal on experiment-tracking tooling. This
+> README documents Ablation H's own setup in detail below, plus an
+> [Ablation Lineage](#ablation-lineage-h--p) section summarizing every
+> ablation that followed it (I through P).
+
 **Question this answers:** Was Ablation A still improving at episode 2799 because it hadn't converged, or was it close to its ceiling? Does more training close the ~4 pp gap with the heuristic baseline?
 
 Ablation H is a direct extension of Ablation A: same plain DQN configuration (n_quantiles=1, v1 server, PER + n-step=3), with the curriculum extended from 2800 to 3600 episodes per worker — an extra 48h tier doubled to 800 episodes and a new 72h tier added.
@@ -131,6 +139,7 @@ servers/
   balloon_env_server_v2.mjs   # v2 (in-development; not used in Ablation H)
 js/                      # shared JS modules (wind, balloon physics, navigator, etc.)
 weights/                 # checkpoints (gitignored except final-ablate-h/)
+docs/                    # pipeline architecture, delivery runbook, tooling ADR
 ```
 
 ---
@@ -154,3 +163,27 @@ weights/                 # checkpoints (gitignored except final-ablate-h/)
 | Workers | 10 |
 | Eval every | 300 eps |
 | Eval duration | 72h |
+
+---
+
+## Ablation Lineage (H → P)
+
+Each ablation below is a direct descendant of the previous one (branch `ablate-<letter>-<slug>`), diagnosing and reacting to the specific failure mode the last one exposed. All use the same `score = 0.5×mean_TWR50 + 0.5×worst_preset_TWR50` metric, 10-worker CI matrix, and `replay.py`/`make_gif.py` visualization described above unless noted.
+
+| Ablation | Key change vs. previous | Result |
+|----------|--------------------------|--------|
+| H | Extended A's curriculum 2800→3600 eps/worker, new 72h tier | Baseline for everything below |
+| I | v2 server; linear potential shaping Φ(s)=β·max(0,1−d/D_max), D_max=500km | Station-keeps ~20h, then escapes past 700km and never returns — no shaping gradient beyond D_max |
+| J | Same reward as I; 30% of 24h+ episodes spawn 150–500km from station (vs. default 30km) | Targets I's failure directly by training on recovery, not just station-keeping |
+| K / K2 | Exponential shaping Φ(s)=β·exp(−d/τ), τ=500km — nonzero gradient at any distance | K had a server bug (shaping flags not passed through, τ silently fell back to 100km); K2 is the corrected re-run |
+| L | 4 Fourier time-feature scalars added to state (20→24 dim): phase within the 8h internal-gravity-wave cycle and 5-day planetary-wave cycle | Lets a memoryless MLP anticipate the wind reversal that was causing escapes, rather than being surprised by it |
+| M | Option-critic + GRU-64 (4 options, Bacon et al. losses) on top of L's setup | Visually purposeful multi-hour commitment in replays, but scored far below L on a clean re-eval (24.7% vs L's 46.9%, 10-seed) with high seed variance — traced to a bundled lr/batch-size change and no gradient clipping (see O) |
+| N | Kept L's Fourier features (no option-critic); γ 0.97→0.99 (TD horizon ~6.25h→~19h), target-update 15→25, curriculum rebalanced toward longer episodes (≥24h share 50%→69%) | 51.8% best score, 10 workers — long enough horizon to back-propagate an 8h IGW reversal into today's decision |
+| O | Reverts M's bundled lr (3e-4→1e-4) and batch_size (32→64) changes, adds `grad_clip_norm=5.0`, raises `oc_term_reg` 0.01→0.05 — otherwise M's exact architecture | Regressed *below* M — bundling 4 changes at once made the actual cause unidentifiable |
+| P | Isolates gradient clipping as the only variable vs. M (`grad_clip_norm` None→5.0, everything else identical to M) | A local gradient-norm probe (948 steps, max 1.26) ruled out clipping itself as O's regression cause — the likely real culprit is M/O's per-episode training cadence producing ~36× fewer gradient steps than L's per-step cadence |
+
+**Caveats before trusting any specific score above:**
+- **Ablation I's committed weights are a smoke-test artifact, not a real result.** `weights/dqn_ablate_i_summary.json` shows `n_workers: 1`, `best_episode: 4` — a 5-episode sanity check that happens to write to the same filename as a real 3600-episode run. Its `best_score` (6.9%) is a near-random policy, not I's actual performance.
+- **M's own training-time eval score is epsilon-contaminated** (an eval epsilon-greedy leak fixed in N) — use the clean 10-seed re-eval cited above (24.7%) for M, not the number in its own `dqn_ablate_m_summary.json`.
+- Several ablation branches have had their history rewritten since training — e.g. `ablate-j-recovery-spawn`'s current tip no longer contains the commit that was actually built and trained for Ablation J (`0123b86`, confirmed via the CI run's pinned `head_sha`), even though `weights/dqn_ablate_j.pt` is the genuine trained artifact from that run. See `docs/architecture/ablation-pipeline.md` (Failure Modes) for the full list of these gaps.
+- I through N were re-run locally (seed 42, 72h, greedy eval) to regenerate `replay_ablate_<letter>_<preset>.{png,gif}` with a Q-value/V(s) diagnostic panel; those single-seed TWR50s will differ slightly from the multi-seed CI scores in the table above.
