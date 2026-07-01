@@ -331,6 +331,64 @@ class QRAgent:
         probs /= probs.sum()
         return int(self.rng.choice(c.action_count, p=probs))
 
+    def select_action_with_value(self, state: np.ndarray):
+        """Eval-only greedy action selection that also returns the state value.
+
+        Mirrors select_action's greedy branch exactly (same forward pass, same
+        option-switching logic) but additionally returns the value estimate
+        driving the decision, so callers don't need a second forward pass
+        (which would double-advance recurrent hidden state).
+
+        Returns (action, v_mean, v_cvar, option):
+          v_mean/v_cvar — mean-of-quantiles vs CVaR_alpha value of the taken
+            action (feedforward/recurrent), or of the active option
+            (option-critic: Q_Ω(s,ω) under the current option ω).
+          option — active option index, or None if use_options=False.
+        """
+        c = self.config
+        if c.use_recurrent and self._inference_hidden is None:
+            self.reset_hidden()
+        x = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+        if c.use_options:
+            with torch.no_grad():
+                out, h_T = self.policy_net(x, self._inference_hidden)
+            self._inference_hidden = h_T
+            q   = out['q'].squeeze(0)                            # (K, A, N)
+            pi  = out['pi_logits'].squeeze(0)                    # (K, A)
+            bet = torch.sigmoid(out['beta_logits'].squeeze(0))   # (K,)
+
+            cvar_qa = self._cvar_of_q(q)                         # (K, A)
+            mean_qa = q.mean(dim=-1)                             # (K, A)
+            pi_prob = torch.softmax(pi, dim=-1)                  # (K, A)
+            v_omega_cvar = (pi_prob * cvar_qa).sum(dim=-1)       # (K,)
+            v_omega_mean = (pi_prob * mean_qa).sum(dim=-1)       # (K,)
+
+            if self._current_option is None:
+                self._current_option = int(v_omega_cvar.argmax().item())
+            else:
+                b = float(bet[self._current_option].item())
+                if self.rng.random() < b:
+                    self._current_option = int(v_omega_cvar.argmax().item())
+
+            opt = self._current_option
+            probs = pi_prob[opt].cpu().numpy().astype(np.float64)
+            probs /= probs.sum()
+            action = int(self.rng.choice(c.action_count, p=probs))
+            return action, float(v_omega_mean[opt].item()), float(v_omega_cvar[opt].item()), opt
+
+        with torch.no_grad():
+            if c.use_recurrent:
+                q_step, h_T = self.policy_net(x, self._inference_hidden)  # (1, A, N)
+                self._inference_hidden = h_T
+                q = q_step.squeeze(0)
+            else:
+                q = self.policy_net(x).squeeze(0)                # (A, N)
+        mean_q = q.mean(dim=-1)                                   # (A,)
+        cvar_q = self._cvar_of_q(q)                               # (A,)
+        action = int(cvar_q.argmax().item())
+        return action, float(mean_q[action].item()), float(cvar_q[action].item()), None
+
     def select_action(self, state: np.ndarray) -> int:
         if self.config.use_recurrent and self._inference_hidden is None:
             self.reset_hidden()
