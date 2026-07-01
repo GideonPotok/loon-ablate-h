@@ -107,7 +107,7 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int) -> di
     return traj
 
 
-def plot_episode(traj: dict, preset: str, out_path: Path):
+def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation H (w00)'):
     color = PRESET_COLORS.get(preset, '#3498db')
     lats  = np.array(traj['lat'])
     lons  = np.array(traj['lon'])
@@ -120,41 +120,58 @@ def plot_episode(traj: dict, preset: str, out_path: Path):
 
     fig = plt.figure(figsize=(16, 10))
     fig.suptitle(
-        f'Ablation H (w00) — {preset}  |  TWR50 = {twr50*100:.1f}%  |  '
+        f'{label} — {preset}  |  TWR50 = {twr50*100:.1f}%  |  '
         f'{traj["n_steps"]} steps  ({times[-1]:.0f} h)',
         fontsize=13, fontweight='bold',
     )
     gs = fig.add_gridspec(2, 3, hspace=0.38, wspace=0.32)
 
-    # ── Panel 1: lat/lon map ──────────────────────────────────────────────────
-    ax_map = fig.add_subplot(gs[:, 0])   # spans both rows
-
-    # station circle (convert radius to degrees for rough scale)
+    # ── Panel 1: lat/lon map, zoomed out (full trajectory) + zoomed in (station) ─
     r_lat = m_to_deg_lat(STATION_RADIUS_M)
     r_lon = m_to_deg_lon(STATION_RADIUS_M)
     theta = np.linspace(0, 2 * math.pi, 200)
     circ_lat = STATION_LAT + r_lat * np.sin(theta)
     circ_lon = STATION_LON + r_lon * np.cos(theta)
-    ax_map.fill(circ_lon, circ_lat, alpha=0.12, color=color, zorder=0)
-    ax_map.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', zorder=1)
-    ax_map.plot(STATION_LON, STATION_LAT, '*', color=color, ms=12, zorder=3)
 
-    # trajectory coloured by in/out radius
-    points = np.array([lons, lats]).T.reshape(-1, 1, 2)
-    segs   = np.concatenate([points[:-1], points[1:]], axis=1)
-    seg_colors = ['#2ecc71' if i else '#e74c3c' for i in in_r[1:]]
-    lc = LineCollection(segs, colors=seg_colors, linewidths=1.2, zorder=2)
-    ax_map.add_collection(lc)
-    ax_map.autoscale_view()
+    def _draw_map(ax, xlim, ylim, title):
+        ax.fill(circ_lon, circ_lat, alpha=0.12, color=color, zorder=0)
+        ax.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', zorder=1)
+        ax.plot(STATION_LON, STATION_LAT, '*', color=color, ms=12, zorder=3)
 
-    ax_map.set_xlabel('Longitude (°)', fontsize=9)
-    ax_map.set_ylabel('Latitude (°)', fontsize=9)
-    ax_map.set_title('Balloon trajectory\n(green = in radius, red = out)', fontsize=9)
-    ax_map.set_aspect('equal', adjustable='datalim')
-    # start/end markers
-    ax_map.plot(lons[0], lats[0], 'o', color='#2c3e50', ms=6, zorder=4, label='start')
-    ax_map.plot(lons[-1], lats[-1], 's', color='#2c3e50', ms=6, zorder=4, label='end')
-    ax_map.legend(fontsize=7, loc='upper right')
+        points = np.array([lons, lats]).T.reshape(-1, 1, 2)
+        segs   = np.concatenate([points[:-1], points[1:]], axis=1)
+        seg_colors = ['#2ecc71' if i else '#e74c3c' for i in in_r[1:]]
+        lc = LineCollection(segs, colors=seg_colors, linewidths=1.2, zorder=2)
+        ax.add_collection(lc)
+
+        ax.plot(lons[0], lats[0], 'o', color='#2c3e50', ms=6, zorder=4, label='start')
+        ax.plot(lons[-1], lats[-1], 's', color='#2c3e50', ms=6, zorder=4, label='end')
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlabel('Longitude (°)', fontsize=9)
+        ax.set_ylabel('Latitude (°)', fontsize=9)
+        ax.set_title(title, fontsize=9)
+
+    # zoomed-out: whole trajectory + 12% padding
+    lon_dev_out = max(np.abs(lons - STATION_LON).max(), r_lon * 1.2) * 1.12
+    lat_dev_out = max(np.abs(lats - STATION_LAT).max(), r_lat * 1.2) * 1.12
+    ax_map_out = fig.add_subplot(gs[0, 0])
+    _draw_map(ax_map_out,
+              (STATION_LON - lon_dev_out, STATION_LON + lon_dev_out),
+              (STATION_LAT - lat_dev_out, STATION_LAT + lat_dev_out),
+              'Full trajectory (zoomed out)\n(green = in radius, red = out)')
+    ax_map_out.legend(fontsize=7, loc='upper right')
+
+    # zoomed-in: fixed view centered on the station, ~1.7x radius
+    ZOOM_IN_MULT = 1.7
+    lon_dev_in = r_lon * ZOOM_IN_MULT
+    lat_dev_in = r_lat * ZOOM_IN_MULT
+    ax_map_in = fig.add_subplot(gs[1, 0])
+    _draw_map(ax_map_in,
+              (STATION_LON - lon_dev_in, STATION_LON + lon_dev_in),
+              (STATION_LAT - lat_dev_in, STATION_LAT + lat_dev_in),
+              'Near station (zoomed in)\n(green = in radius, red = out)')
 
     # ── Panel 2: altitude vs time ─────────────────────────────────────────────
     ax_alt = fig.add_subplot(gs[0, 1])
@@ -229,6 +246,10 @@ def main():
     parser.add_argument('--duration', type=float, default=3600 * 72,
                         help='Episode length in seconds (default: 72h)')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--label', default='Ablation H (w00)',
+                        help='Title label for the plot')
+    parser.add_argument('--out-prefix', default='replay',
+                        help='Output filename prefix (default: replay)')
     args = parser.parse_args()
 
     weight_path = Path(args.weight)
@@ -245,8 +266,8 @@ def main():
         print(f'\nRunning {preset} ({args.duration/3600:.0f} h)...')
         traj = run_episode(agent, preset, args.duration, args.seed)
         print(f'  TWR50 = {traj["twr50"]*100:.1f}%  steps = {traj["n_steps"]}')
-        out = Path(f'replay_{preset.replace("-","_")}.png')
-        plot_episode(traj, preset, out)
+        out = Path(f'{args.out_prefix}_{preset.replace("-","_")}.png')
+        plot_episode(traj, preset, out, label=args.label)
 
     print('\nDone.')
 
