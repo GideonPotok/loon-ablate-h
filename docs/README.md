@@ -4,7 +4,7 @@ Process and architecture documentation for the ablation-delivery pipeline
 (as opposed to the root `README.md`, which documents Ablation H's specific
 hyperparameters and results).
 
-- [Architecture: Ablation Delivery Pipeline](architecture/ablation-pipeline.md) — how ideation, implementation, CI, artifact collection, and visualization fit together end to end, plus the key design decisions and their trade-offs.
+- [Architecture: Ablation Delivery Pipeline](architecture/ablation-pipeline.md) — how ideation, implementation, CI, artifact collection, and visualization fit together end to end, plus the key design decisions and their trade-offs, plus a [noise/exploration audit](architecture/ablation-pipeline.md#loss-exploration-and-noise-model) covering Huber loss, entropy regularization, ε-greedy exploration, and a still-unwired domain-randomization gap.
 - [Runbook: Ship a New Ablation](runbooks/ship-a-new-ablation.md) — step-by-step procedure for delivering the next ablation, with the right way flagged at each step against real historical mistakes, plus the full branching model.
 - [ADR-0001: Experiment Tracking Tooling](adr/0001-experiment-tracking-tooling.md) — whether Weights & Biases, MLflow, or TensorBoard would help vs. continuing the current docstring/JSON/branch-name process.
 
