@@ -89,12 +89,29 @@ ABLATION_ENV_FLAGS = {
         'shaping_linear':     False,
         'shaping_D_max':      500_000.0,
     },
+    'r': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  False,            # oracle removed — 20-dim
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+        # Realism bundle — replays must run in the env R trained in
+        'wind_phase_jitter':  True,
+        'wind_episode_noise': True,
+        'wind_param_jitter':  True,
+        'domain_rand':        True,
+    },
 }
 ABLATION_LABELS = {
     'k2': 'Ablation K2 (exp shaping, tau=500km)',
     'l':  'Ablation L (+ Fourier time features)',
     'm':  'Ablation M (option-critic + GRU-64)',
     'q':  'Ablation Q (option-critic, per-step cadence)',
+    'r':  'Ablation R (realism floor, no oracle features)',
 }
 # Architecture overrides not recoverable from the checkpoint's saved config
 # (QRAgent.state_dict() only persists the feedforward-relevant fields).
