@@ -12,17 +12,31 @@ Steps 1–3 and 5 of the return checklist below are DONE; what changed:
 2. **Transfer probe on Q**: 25.0% legacy → 13.6% realism (−11.4 pp; vs N's
    −30.1 pp). Same realism floor as N, less clock-reading skill to lose.
    Raw JSON: `weights/dqn_ablate_q_transfer_probe.json` (untracked).
-3. **Ablation R is training on CI** — run 28946597726, dispatched
-   2026-07-08 13:32Z on `ablate-r-realism-env` @ `a31cfee`.
-4. **S and T are built, PR'd, NOT yet dispatched** (gated on R's sanity
-   check per step 4 below): S = `ablate-s-estimated-phase` (PR #4),
-   T = `ablate-t-gru-memory` (PR #6), both based on `ablate-r-realism-env`,
-   both smoke-tested, CI trios rewired, replay/gif registries updated.
+3. **Ablation R is DONE** — run 28946597726 (`ablate-r-realism-env` @
+   `a31cfee`) completed 2026-07-08 ~18:38Z. **Best 64.2%** (worker 8,
+   ep 2999; tropical 77.6% / strong-shear 52.0% / calm 100%), worker mean
+   44.9% ± 8.8 pp, all 10 workers ≥ 36.5% (no floor-sitters). Step-4
+   sanity check PASSES decisively: far above the ~7% random floor and the
+   probe's 16% transfer bound — the realism env is learnable without the
+   oracle clock. (Reminder: R/S/T scores are NOT comparable to H–Q.)
+   Artifacts: `weights/dqn_ablate_r.pt`, `weights/dqn_ablate_r_summary.json`
+   (untracked, per J–N convention).
+4. **S and T are training in parallel** in a separate org (`Minevra-co`
+   — its Actions concurrency pool is separate from the personal account,
+   so they never contended with R): S = Minevra-co/loon-ablate-s run
+   28948653461 @ `cc8f95c`; T = Minevra-co/loon-ablate-t run 28967213334
+   @ `8cff727` (= `ad02ab6` + CI-nudge commits — T's train.yml wasn't
+   registered by GitHub until a commit touched the workflow file itself;
+   empty commits don't trigger indexing). User waived the wait-for-R gate
+   when creating the org; R's subsequent sanity pass vindicated that.
+   Both smoke-tested, CI trios rewired, replay/gif registries updated;
+   PRs in the main repo: S #4, T #6. The org pool runs ~5–6 jobs at a
+   time, so S/T interleave in waves (longer wall clock, hands-off).
 
-Still to do: step 4 (sanity-check R when run 28946597726 finishes), then
-dispatch S and T training (serially — matrices contend for runners), then
-step 6 (R vs S vs T readout). Optional: Q replay GIFs (registry entries
-exist on the Q branch).
+Still to do: step 6 (R vs S vs T readout) when the org runs finish —
+download `final-ablate-s` / `final-ablate-t` artifacts from the org repos
+into `weights/`. Optional: Q replay GIFs (registry entries exist on the
+Q branch).
 
 ---
 
