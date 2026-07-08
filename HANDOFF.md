@@ -1,5 +1,31 @@
 # Handoff — 2026-07-02 (Ablation Q training / realism era begins)
 
+## Update — 2026-07-08 (return session)
+
+Steps 1–3 and 5 of the return checklist below are DONE; what changed:
+
+1. **Q's results are in** (run 28603087701, artifacts downloaded to
+   `weights/`): best worker 37.9%, worker mean 24.4% ± 10 pp. Clean 10-seed
+   re-eval via the transfer probe (legacy mode): **25.0% ≈ M's 24.7%**
+   despite 8× the gradients — the cadence theory is dead; evidence against
+   option-critic itself. README lineage row added (PR #8).
+2. **Transfer probe on Q**: 25.0% legacy → 13.6% realism (−11.4 pp; vs N's
+   −30.1 pp). Same realism floor as N, less clock-reading skill to lose.
+   Raw JSON: `weights/dqn_ablate_q_transfer_probe.json` (untracked).
+3. **Ablation R is training on CI** — run 28946597726, dispatched
+   2026-07-08 13:32Z on `ablate-r-realism-env` @ `a31cfee`.
+4. **S and T are built, PR'd, NOT yet dispatched** (gated on R's sanity
+   check per step 4 below): S = `ablate-s-estimated-phase` (PR #4),
+   T = `ablate-t-gru-memory` (PR #6), both based on `ablate-r-realism-env`,
+   both smoke-tested, CI trios rewired, replay/gif registries updated.
+
+Still to do: step 4 (sanity-check R when run 28946597726 finishes), then
+dispatch S and T training (serially — matrices contend for runners), then
+step 6 (R vs S vs T readout). Optional: Q replay GIFs (registry entries
+exist on the Q branch).
+
+---
+
 State of play when this session paused, and exactly what to do on return.
 Written from the `ablate-q-per-step-option-critic` worktree session that built
 Ablations Q and R. Companion background: the Ablation Lineage table in
