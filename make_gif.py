@@ -89,6 +89,22 @@ ENV_FLAGS = {
         'wind_param_jitter':  True,
         'domain_rand':        True,
     },
+    't': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  False,            # no phase features — memory arm, 20-dim
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+        # Realism bundle — replays must run in the env T trained in
+        'wind_phase_jitter':  True,
+        'wind_episode_noise': True,
+        'wind_param_jitter':  True,
+        'domain_rand':        True,
+    },
 }
 
 LABELS = {
@@ -97,6 +113,7 @@ LABELS = {
     'm':  'Ablation M (option-critic + GRU-64)',
     'q':  'Ablation Q (option-critic, per-step cadence)',
     'r':  'Ablation R (realism floor, no oracle features)',
+    't':  'Ablation T (plain GRU memory arm)',
 }
 # Architecture overrides not recoverable from the checkpoint's saved config
 # (QRAgent.state_dict() only persists the feedforward-relevant fields).
@@ -108,6 +125,10 @@ AGENT_KWARGS = {
     'q': {
         'use_recurrent': True, 'use_options': True,
         'n_options': 4, 'gru_hidden': 64,
+    },
+    't': {
+        'use_recurrent': True, 'use_options': False,
+        'gru_hidden': 64,
     },
 }
 
