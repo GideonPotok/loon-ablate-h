@@ -33,10 +33,23 @@ Steps 1–3 and 5 of the return checklist below are DONE; what changed:
    PRs in the main repo: S #4, T #6. The org pool runs ~5–6 jobs at a
    time, so S/T interleave in waves (longer wall clock, hands-off).
 
-Still to do: step 6 (R vs S vs T readout) when the org runs finish —
-download `final-ablate-s` / `final-ablate-t` artifacts from the org repos
-into `weights/`. Optional: Q replay GIFs (registry entries exist on the
-Q branch).
+5. **Step-6 readout is DONE** (S run completed 2026-07-09, T 2026-07-10;
+   artifacts in `weights/dqn_ablate_{s,t}*`):
+   - R: best 64.2%, mean 44.9% ± 8.8 pp
+   - S: best 57.3%, mean **50.5% ± 5.7 pp** (+5.6 pp vs R, ~1.7σ)
+   - T: best 41.4%, mean **30.4% ± 6.6 pp** (−14.5 pp vs R, ~4σ)
+
+   Verdict: **S ≈ R (modest +)** — estimated phase features buy a small
+   mean/consistency gain, not an oracle-sized one; phase info is not the
+   load-bearing ingredient in the realism env. **T < R** — the GRU arm
+   underperforms the feedforward floor outright (T's best worker is below
+   R's worker mean), extending the M/O/P/Q anti-recurrence pattern.
+   Full writeup: README "Realism Era (R / S / T)" section (this branch,
+   PR #8).
+
+ALL return-checklist steps are now complete. Optional leftovers: Q replay
+GIFs (registry entries exist on the Q branch); R/S/T replay GIFs (registry
+entries exist on their branches); merge decisions for PRs #3/#4/#6/#8.
 
 ---
 
