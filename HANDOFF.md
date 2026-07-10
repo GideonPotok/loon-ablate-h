@@ -33,17 +33,22 @@ Steps 1–3 and 5 of the return checklist below are DONE; what changed:
    PRs in the main repo: S #4, T #6. The org pool runs ~5–6 jobs at a
    time, so S/T interleave in waves (longer wall clock, hands-off).
 
-5. **Step-6 readout is DONE** (S run completed 2026-07-09, T 2026-07-10;
-   artifacts in `weights/dqn_ablate_{s,t}*`):
-   - R: best 64.2%, mean 44.9% ± 8.8 pp
-   - S: best 57.3%, mean **50.5% ± 5.7 pp** (+5.6 pp vs R, ~1.7σ)
-   - T: best 41.4%, mean **30.4% ± 6.6 pp** (−14.5 pp vs R, ~4σ)
+5. **Step-6 readout is DONE** (S run completed 2026-07-09, T 2026-07-10)
+   — but NOT on in-run scores: those are winner's-cursed in the realism
+   env (per-seed TWR50 stdev ±31–38 pp; R's in-run 64.2% → 38.4% clean).
+   Clean 10-seed re-eval of each winner checkpoint (probe protocol, seeds
+   42+i·1,000,003, 72h; scripts `scratch/reeval_{r,s,t}.py`, JSONs
+   `weights/dqn_ablate_{r,s,t}_reeval.json`):
+   - R: realism **38.4%** / legacy 40.4%  (in-run: 64.2% best, 44.9% mean)
+   - S: realism **37.8%** / legacy 38.5%  (in-run: 57.3% best, 50.5% mean)
+   - T: realism **20.7%** / legacy 12.0%  (in-run: 41.4% best, 30.4% mean)
 
-   Verdict: **S ≈ R (modest +)** — estimated phase features buy a small
-   mean/consistency gain, not an oracle-sized one; phase info is not the
-   load-bearing ingredient in the realism env. **T < R** — the GRU arm
-   underperforms the feedforward floor outright (T's best worker is below
-   R's worker mean), extending the M/O/P/Q anti-recurrence pattern.
+   Verdict: **S ≈ R exactly** (paired per-episode Δ −1.7 pp, t=−0.33,
+   n=30) — phase info is not load-bearing in the realism env; the
+   "all ≈ R" branch of the decision rules. **T ≪ R** (paired Δ −19.4 pp,
+   t=−3.4; legacy Δ −38.8 pp, t=−6.7) — the GRU arm roughly halves the
+   feedforward floor, extending the M/O/P/Q anti-recurrence pattern.
+   R and S are env-invariant (~38–40% both envs); N was not (46→16).
    Full writeup: README "Realism Era (R / S / T)" section (this branch,
    PR #8).
 
