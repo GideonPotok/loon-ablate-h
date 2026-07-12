@@ -1,8 +1,8 @@
 # Ablation Delivery Pipeline — Architecture
 
-**Status:** Accepted (describes practice as observed on `main` and the `ablate-h`→`ablate-p` branch lineage)
-**Author:** Documentation pass by Claude (Sonnet 5), reviewed against repo state on 2026-07-01
-**Date:** 2026-07-01
+**Status:** Accepted (describes practice as observed on `main` and the `ablate-h`→`ablate-q` branch lineage)
+**Author:** Documentation pass by Claude (Sonnet 5), reviewed against repo state on 2026-07-01; [Loss, Exploration, and Noise Model](#loss-exploration-and-noise-model) section added 2026-07-02 based on a cross-branch noise/exploration audit
+**Date:** 2026-07-01 (updated 2026-07-02)
 **Reviewers:** Gideon Potok
 
 ## Context
@@ -85,7 +85,7 @@ a laptop against a downloaded checkpoint.
 ### Environment layer — `servers/*.mjs` + `js/`
 - **`servers/balloon_env_server.mjs` (v1)** — frozen physics/reward engine, used by Ablation H as the stable baseline.
 - **`servers/balloon_env_server_v2.mjs` (v2)** — actively evolving; carries every reward-shaping / state-expansion / time-feature change from Ablation I onward. `BalloonEnv(server_version=...)` selects between them.
-- **`js/`** — added wholesale in one commit (`aa09d55`) because the servers `import` from it. Only about half the files are real runtime dependencies (`config.js`, `atmosphere.js`, `geo.js`, `wind.js`, `balloon.js`, `wind_observer.js`, `wind_ekf.js`, `wind_degrader.js`, `navigator.js`, and one helper from `rl_agent.js`). The rest (`app.js`, `dqn.js`, `qr_agent.js`, `iqn_agent.js`, `rl_trainer.js`, `cem_mpc.js`, `charts.js`, `map.js`, `wind_archive.js`, `forecast.js`) are vestiges of a prior in-browser dashboard tool and are not imported by the training pipeline at all.
+- **`js/`** — added wholesale in one commit (`aa09d55`) because the servers `import` from it. Only about half the files are real runtime dependencies (`config.js`, `atmosphere.js`, `geo.js`, `wind.js`, `balloon.js`, `wind_observer.js`, `wind_ekf.js`, `wind_degrader.js`, `navigator.js`, and one helper from `rl_agent.js`). The rest (`app.js`, `dqn.js`, `qr_agent.js`, `iqn_agent.js`, `rl_trainer.js`, `cem_mpc.js`, `charts.js`, `map.js`, `wind_archive.js`, `forecast.js`) are vestiges of a prior in-browser dashboard tool and are not imported by the training pipeline at all — including `rl_trainer.js`'s domain-randomization mechanism; see [Loss, Exploration, and Noise Model](#loss-exploration-and-noise-model) below.
 
 ### Orchestration layer
 - **`ablate_<letter>_train.py`** — local entry point: curriculum table, `BASE_CONFIG`, a `multiprocessing` launcher that starts N worker processes.
@@ -100,6 +100,35 @@ a laptop against a downloaded checkpoint.
 - GitHub Actions artifacts are downloaded manually (`gh run download` or the Actions UI — no script wraps this) into `weights/`.
 - **`replay.py`** — loads a checkpoint, reconstructs `QRConfig` from the checkpoint's own saved config, forces greedy eval (`epsilon=0`), runs one episode per wind preset, renders a 5-panel static PNG (trajectory map, altitude vs. time, distance vs. time, action histogram, action sequence).
 - **`make_gif.py`** (introduced for Ablation N, extended for M) — a registry-based tool: an `ENV_FLAGS` dict keyed by ablation id (`'k2'`, `'l'`, `'m'`, …) plus `AGENT_KWARGS` for architecture flags not recoverable from the checkpoint (e.g. Option-Critic/GRU flags aren't in `QRAgent.state_dict()`), driving `matplotlib.animation.FuncAnimation` + `PillowWriter`.
+
+## Loss, Exploration, and Noise Model
+
+An audit (2026-07-02) of everywhere robustness/stochasticity actually lives
+in this stack, cross-checked against every branch in the lineage (`main`,
+I, J, K, K-fixed, L, M, N, O, P, Q as of this writing) rather than just the
+two ablations (`H`, `I`) whose scripts exist on `main`.
+
+- **Critic loss:** exactly one Huber term in the codebase — `quantile_huber_loss` (`qr_agent.py:186`), the Dabney et al. 2018 quantile-regression Huber loss, `κ = huber_kappa = 1.0` (`qr_agent.py:33`). It's the QR-DQN distributional-Bellman critic loss, used identically by all three training methods (`train_batch`, `train_batch_seq`, `train_batch_options`). This is a robust regression loss on the TD/quantile error, not a noise or exploration mechanism.
+- **Entropy regularization:** exactly one term, `oc_entropy_reg` (default `0.01`, `qr_agent.py:80`), applied only inside `train_batch_options` (`qr_agent.py:677`) to regularize the Option-Critic's intra-option policy `π_ω`. Fires only when `use_options=True` — i.e. only Ablations M, O, P, Q. The plain QR-DQN path (H, I, J, K, K2, L, N) has zero entropy regularization anywhere; expected for a value-based method, not a gap.
+- **Exploration noise:** ε-greedy only (`epsilon_start=1.0 → epsilon_end=0.03`, `decay=0.9988`, `qr_agent.py:41-43`, `select_action` at `qr_agent.py:392`). No NoisyNets, no parameter-space noise. In Option-Critic mode the intra-option action is sampled from `softmax(π_ω)` rather than argmax, adding a mild stochastic element, but option switching still gates through the same ε-greedy mechanism.
+- **Environment-side noise (present, unconditional, identical on every branch):**
+  - `ForecastDegrader` (`js/wind_degrader.js`) — Gaussian bias (`BIAS_SIGMA=0.71` m/s, `:57`) + time-varying Gaussian noise (`NOISE_SIGMA=2.93` m/s, refreshed every `NOISE_UPDATE_S=1800`s / 30min, `:59-60`), vertically correlated, calibrated 2026-05-05 from an IGRA×ERA5 cross-validation (15 stations, 1°N–47°N, 138,089 collocated obs). Wired unconditionally into both `servers/balloon_env_server.mjs:55` and `servers/balloon_env_server_v2.mjs:55` — every Python-driven episode, on every branch, gets exactly this one fixed distribution.
+  - EKF/GPS measurement noise (`GPS_NOISE_STD=0.3`, `js/wind_observer.js:44`; `PROCESS_NOISE_STD=0.005`, `js/wind_ekf.js:34`) feeding the wind estimator whose uncertainty shows up as a state feature.
+  - Per-episode spawn-position/seed randomization (`balloon_env.py` reset).
+
+### Gap: domain randomization never reaches the Python-driven pipeline
+
+`js/rl_trainer.js` defines a Tobin (2017) / Pham (2023)-style domain-randomization mechanism: `DOMAIN_RAND_ENABLED` (default `false`, `:79`), `DOMAIN_RAND_SIGMA_MIN`/`MAX` (`0.5×`–`2.0×` the calibrated σ, `:80-81`), and `DOMAIN_RAND_MAX_LAG_S` (`:82`) — sampling a log-uniform noise-σ scale and a uniform forecast lag per episode (`:274-278`) so training sees varying forecast-quality regimes instead of one fixed distribution.
+
+This mechanism is read only inside `js/rl_trainer.js`'s own `train()` path — the dead in-browser-dashboard half of `js/` (see [Environment layer](#environment-layer--serversmjs--js) above). `servers/balloon_env_server.mjs` and `servers/balloon_env_server_v2.mjs` — the two servers `balloon_env.py` actually spawns — never reference `DOMAIN_RAND` at all: confirmed by grepping both server files on every branch in the lineage (`main`, I, J, K, K-fixed, L, M, N, O, P, Q) — zero hits, every branch. Nothing in `balloon_env.py` or any `ablate_<letter>_train.py` sends a domain-rand flag either.
+
+**Consequence:** every ablation shipped to date — the entire H-through-Q lineage — trains and is evaluated against one fixed, calibrated noise distribution and has never been tested against varying forecast-quality regimes. If these agents are meant to generalize to real forecasts (which vary station-to-station and season-to-season), this is the missing knob — and unlike most gaps in this doc, the mechanism to close it already exists in the repo, just not wired to anything the Python pipeline touches. See [Future Considerations](#future-considerations).
+
+### Related, now-fixed finding: eval was not degreedy'd on H/I
+
+Worth recording alongside the gap above because it's the inverse failure — an *unwanted* noise term contaminating a metric, rather than a missing one. On `main` (Ablations H and I only), `_eval_multi_preset` calls `agent.select_action(state)` directly (`ablate_h_train.py:114`, `ablate_i_train.py:142`), which still rolls `rng.random() < self.epsilon` — `epsilon` is logged (`ablate_h_train.py:206`) but never zeroed for eval, and only decays to a floor of `0.03` (starting at `1.0` early in training). So H's and I's eval scores mix in anywhere from 3% to 100% literal random actions depending on where in the decay schedule the eval call lands.
+
+**This is already fixed from Ablation N onward** — not present on `main` (hence easy to miss if you only audit `main`'s checked-in `ablate_h_train.py`/`ablate_i_train.py`, which is the whole reason this note exists). `qr_agent.py`'s `select_action` gained a `greedy: bool = False` parameter (confirmed on `ablate-n-horizon-curriculum:qr_agent.py:334`, docstring: *"greedy=True suppresses ε-exploration entirely — use for eval, never for training rollouts"*), and `_eval_multi_preset` calls `agent.select_action(state, greedy=True)` starting with N and continuing through O, P, and Q (all confirmed). Also referenced in the [runbook history table](../runbooks/ship-a-new-ablation.md#history) as "eval epsilon-greedy leak fix."
 
 ## Data Flow
 
@@ -149,6 +178,7 @@ a laptop against a downloaded checkpoint.
 | Smoke-test output (`smoke_test.yml`, 1 worker, 5 episodes) writes to the same filenames (`weights/dqn_ablate_i.pt`, `_summary.json`) as a real 10-worker/3600-episode run | Ablation I's committed "final" weights are actually a 5-episode smoke run (`n_workers: 1`, `best_episode: 4`, `best_score: 6.9%`) — anyone replaying them sees a near-random policy and could mistake it for a trained result | Only visible by opening the summary JSON and noticing `n_workers: 1` | Not yet fixed — no distinct namespace exists for smoke vs. production output |
 | `EnterWorktree`-style branch creation collided with a pre-existing branch name: `ablate-j-recovery-spawn` never received the actual "Ablation J" commit (`0123b86`); that commit only landed on the confusingly similar `worktree-ablate-j-recovery-spawn` | The branch named for Ablation J doesn't contain Ablation J; anyone continuing "ablation J" work on the plain-named branch is missing the actual commit | `git merge-base --is-ancestor 0123b86 ablate-j-recovery-spawn` → no | Not yet reconciled — flagged here so it isn't silently perpetuated |
 | `README.md` was added in a side commit (`b8416bf`, on `ablate-i-linear-shaping`) that is **not an ancestor of `main`** (`main` is at `174adf6`) | `README.md` does not exist at all on the branch lineage that J, K, L, K2, M, N, O, P all descend from — the project's only onboarding doc is invisible from most of the active work | `git merge-base --is-ancestor b8416bf ablate-p-clipped-option-critic` → no | This `docs/` tree is added on top of `main` (`174adf6`) for the same reason — see the note in the [runbook](../runbooks/ship-a-new-ablation.md) about merging docs forward |
+| `js/rl_trainer.js`'s `DOMAIN_RAND_ENABLED` mechanism was built (bias/noise σ scale + forecast lag randomization) but never wired into `servers/balloon_env_server{,_v2}.mjs` | Every ablation H through Q trains and evaluates against one fixed, calibrated noise distribution; no ablation has ever tested generalization across forecast-quality regimes | Grepping `DOMAIN_RAND` in either server `.mjs` on any branch → zero hits, all 11 branches checked | Not yet fixed — see [Loss, Exploration, and Noise Model](#loss-exploration-and-noise-model) |
 
 ## Security Considerations
 
@@ -166,6 +196,6 @@ Not applicable in the traditional sense — no user-facing surface, no secrets b
 - Parameterize `train.yml` with a `workflow_dispatch` input (`ablation_id`) instead of hand-editing three files per ablation — this single change would have prevented the entire artifact-path bug saga.
 - Add a lightweight schema check between Python's `_env_flags()` and the JS server's `handleReset()` parsing (even just an assertion that every key sent is a key read) to catch the K/K2-style silent flag drop at run time instead of after the fact.
 - Give smoke-test output its own filename prefix or subdirectory so it can never be mistaken for a production result.
-- Prune or relocate the dead half of `js/` (`app.js`, `dqn.js`, `iqn_agent.js`, `rl_trainer.js`, `cem_mpc.js`, `charts.js`, `map.js`, `wind_archive.js`, `forecast.js`) — none of it is imported by the training pipeline.
+- Prune or relocate the dead half of `js/` (`app.js`, `dqn.js`, `iqn_agent.js`, `rl_trainer.js`, `cem_mpc.js`, `charts.js`, `map.js`, `wind_archive.js`, `forecast.js`) — none of it is imported by the training pipeline. **Before pruning `rl_trainer.js` specifically:** port its `DOMAIN_RAND_ENABLED` mechanism (log-uniform noise-σ scale + uniform forecast-lag sampling per episode, `js/rl_trainer.js:70-82,274-278`) into `servers/balloon_env_server.mjs`/`_v2.mjs` first and expose it as a flag `balloon_env.py` can pass through (mirroring how `shaping_linear`/`shaping_D_max` are threaded today — see the flag-parsing failure mode above for the trap to avoid). This is the one existing, calibrated knob that would let a future ablation test whether these agents generalize across forecast-quality regimes instead of overfitting to the single fixed distribution every ablation H–Q has trained against.
 - Consolidate `replay.py` and `make_gif.py` behind one shared per-ablation registry (generalizing `make_gif.py`'s `ENV_FLAGS`/`AGENT_KWARGS` pattern to drive both PNG and GIF output), rather than maintaining two tools plus one-off scripts like the observed `make_gif_j.py`.
 - Consider real experiment-tracking tooling — see [ADR-0001: Experiment Tracking Tooling](../adr/0001-experiment-tracking-tooling.md).
