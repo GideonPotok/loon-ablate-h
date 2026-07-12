@@ -30,6 +30,16 @@ PRESET_COLORS = {
 # Env flags as actually used at training time for each ablation
 # (server_version='v2' for both; K2 = 20-dim state, L = 24-dim w/ Fourier time features)
 ENV_FLAGS = {
+    'j': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     True,             # linear cutoff at D_max (unlike K2/L/M/N)
+        'shaping_D_max':      500_000.0,        # 10R = 500 km
+    },
     'k2': {
         'use_reward_fix':     True,
         'use_shaping':        True,
@@ -56,6 +66,17 @@ ENV_FLAGS = {
         'use_shaping':        True,
         'use_expanded_state': False,
         'use_time_features':  True,             # 20 -> 24 dim (same as L)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
+    'n': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim (same as L/M)
         'shaping_beta':       0.5,
         'shaping_gamma':      0.97,
         'terminal_twr_bonus': 50.0,
@@ -92,9 +113,11 @@ ENV_FLAGS = {
 }
 
 LABELS = {
+    'j':  'Ablation J (linear shaping + recovery spawn)',
     'k2': 'Ablation K2 (exp shaping, tau=500km)',
     'l':  'Ablation L (+ Fourier time features)',
     'm':  'Ablation M (option-critic + GRU-64)',
+    'n':  'Ablation N (gamma 0.99 + curriculum rebalance)',
     'q':  'Ablation Q (option-critic, per-step cadence)',
     'r':  'Ablation R (realism floor, no oracle features)',
 }
@@ -141,11 +164,12 @@ def run_episode(agent, preset, duration_s, seed, flags):
                      server_version='v2', flags=flags)
     agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
-    traj = {k: [] for k in ('time_h', 'lat', 'lon', 'alt_m', 'dist_km', 'in_radius', 'reward')}
+    traj = {k: [] for k in ('time_h', 'lat', 'lon', 'alt_m', 'dist_km', 'in_radius',
+                             'reward', 'v_mean', 'v_cvar', 'option')}
     done = False
     step = 0
     while not done:
-        action = agent.select_action(state, greedy=True)
+        action, v_mean, v_cvar, option = agent.select_action_with_value(state)
         next_state, reward, done, info = env.step(action)
         traj['time_h'].append(info.get('time_s', step * 300) / 3600)
         traj['lat'].append(info.get('lat', STATION_LAT))
@@ -155,11 +179,17 @@ def run_episode(agent, preset, duration_s, seed, flags):
         traj['dist_km'].append(dist_m / 1000)
         traj['in_radius'].append(dist_m < STATION_RADIUS_M)
         traj['reward'].append(float(reward))
+        traj['v_mean'].append(v_mean)
+        traj['v_cvar'].append(v_cvar)
+        traj['option'].append(-1 if option is None else option)
         state = next_state
         step += 1
     env.close()
     traj['twr50'] = sum(traj['in_radius']) / max(len(traj['in_radius']), 1)
-    return {k: (np.array(v) if k != 'twr50' else v) for k, v in traj.items()}
+    traj['cvar_alpha'] = agent.config.cvar_alpha
+    traj['use_options'] = agent.config.use_options
+    return {k: (np.array(v) if k not in ('twr50', 'cvar_alpha', 'use_options') else v)
+            for k, v in traj.items()}
 
 
 def make_gif(traj, preset, out_path, label, stride=4, fps=12):
@@ -171,6 +201,12 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
     times   = traj['time_h']
     in_r    = traj['in_radius']
     rewards = traj['reward']
+    v_mean  = traj['v_mean']
+    v_cvar  = traj['v_cvar']
+    options = traj['option']
+    cvar_alpha  = traj.get('cvar_alpha', 1.0)
+    use_options = bool(traj.get('use_options', False))
+    show_cvar   = cvar_alpha < 1.0
     twr50   = traj['twr50']
     n       = len(times)
 
@@ -250,7 +286,21 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
     ax_rew.axhline(1, color='#225533', lw=0.7, ls=':')
     ax_rew.set_xlabel('Time (h)', color='#888899', fontsize=7)
     ax_rew.set_ylabel('reward', color='#888899', fontsize=7)
-    ax_rew.set_title('Step reward  (grey = 1-h rolling mean)', color='white', fontsize=8)
+
+    ax_val = ax_rew.twinx()
+    ax_val.set_facecolor('none')
+    ax_val.tick_params(colors='#f4d03f', labelsize=7)
+    for spine in ax_val.spines.values():
+        spine.set_visible(False)
+    v_all = np.concatenate([v_mean, v_cvar]) if show_cvar else v_mean
+    v_pad = max((v_all.max() - v_all.min()) * 0.1, 0.05)
+    ax_val.set_xlim(0, times[-1])
+    ax_val.set_ylim(v_all.min() - v_pad, v_all.max() + v_pad)
+    ax_val.set_ylabel('V(s)', color='#f4d03f', fontsize=7)
+
+    rew_title = 'Step reward (grey=roll mean)  vs.  agent V(s) (yellow'
+    rew_title += '=mean/orange=CVaR)' if show_cvar else '=mean-of-quantiles)'
+    ax_rew.set_title(rew_title, color='white', fontsize=8)
 
     trail_line,  = ax_map.plot([], [], lw=2.2, zorder=2, solid_capstyle='round')
     balloon_dot, = ax_map.plot([], [], 'o', ms=11, zorder=5,
@@ -269,17 +319,25 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
     rew_roll,  = ax_rew.plot([], [], lw=1.6, color='#aaaaaa')
     rew_dot,   = ax_rew.plot([], [], 'o', color='white', ms=4)
 
+    vmean_line, = ax_val.plot([], [], lw=1.3, color='#f4d03f', ls='--')
+    vmean_dot,  = ax_val.plot([], [], 'o', color='#f4d03f', ms=4)
+    val_artists = [vmean_line, vmean_dot]
+    if show_cvar:
+        vcvar_line, = ax_val.plot([], [], lw=1.3, color='#e67e22', ls='--')
+        vcvar_dot,  = ax_val.plot([], [], 'o', color='#e67e22', ms=4)
+        val_artists += [vcvar_line, vcvar_dot]
+
     frames = list(range(0, n, stride))
     if frames[-1] != n - 1:
         frames.append(n - 1)
 
     def init():
         for a in (trail_line, balloon_dot, dist_line, dist_dot,
-                  alt_line, alt_dot, rew_step, rew_roll, rew_dot):
+                  alt_line, alt_dot, rew_step, rew_roll, rew_dot, *val_artists):
             a.set_data([], [])
         time_txt.set_text('')
         return (trail_line, balloon_dot, dist_line, dist_dot,
-                alt_line, alt_dot, rew_step, rew_roll, rew_dot, time_txt)
+                alt_line, alt_dot, rew_step, rew_roll, rew_dot, time_txt, *val_artists)
 
     def update(fi):
         i = frames[fi]
@@ -290,11 +348,13 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
         trail_line.set_color(c_trail)
         balloon_dot.set_data([lons[i]], [lats[i]])
         balloon_dot.set_color('#2ecc71' if in_r[i] else '#e74c3c')
+        opt_line = f'\nopt  = {options[i]}' if use_options else ''
         time_txt.set_text(
             f't = {times[i]:.1f} h  [{"IN " if in_r[i] else "OUT"}]\n'
             f'dist = {dists[i]:.0f} km\n'
             f'alt  = {alts[i]/1000:.2f} km\n'
-            f'rew  = {rewards[i]:.3f}'
+            f'rew  = {rewards[i]:.3f}\n'
+            f'V(s) = {v_cvar[i]:.2f}{opt_line}'
         )
 
         dist_line.set_data(times[:i+1], dists[:i+1])
@@ -307,8 +367,16 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
         rew_roll.set_data(times[:i+1], reward_roll[:i+1])
         rew_dot.set_data([times[i]], [rewards[i]])
 
+        vmean_line.set_data(times[:i+1], v_mean[:i+1])
+        vmean_dot.set_data([times[i]], [v_mean[i]])
+        val_frame = [vmean_line, vmean_dot]
+        if show_cvar:
+            vcvar_line.set_data(times[:i+1], v_cvar[:i+1])
+            vcvar_dot.set_data([times[i]], [v_cvar[i]])
+            val_frame += [vcvar_line, vcvar_dot]
+
         return (trail_line, balloon_dot, dist_line, dist_dot,
-                alt_line, alt_dot, rew_step, rew_roll, rew_dot, time_txt)
+                alt_line, alt_dot, rew_step, rew_roll, rew_dot, time_txt, *val_frame)
 
     ani = FuncAnimation(fig, update, frames=len(frames), init_func=init,
                         interval=1000/fps, blit=True)
