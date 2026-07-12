@@ -1,5 +1,63 @@
 # Handoff — 2026-07-02 (Ablation Q training / realism era begins)
 
+## Update — 2026-07-08 (return session)
+
+Steps 1–3 and 5 of the return checklist below are DONE; what changed:
+
+1. **Q's results are in** (run 28603087701, artifacts downloaded to
+   `weights/`): best worker 37.9%, worker mean 24.4% ± 10 pp. Clean 10-seed
+   re-eval via the transfer probe (legacy mode): **25.0% ≈ M's 24.7%**
+   despite 8× the gradients — the cadence theory is dead; evidence against
+   option-critic itself. README lineage row added (PR #8).
+2. **Transfer probe on Q**: 25.0% legacy → 13.6% realism (−11.4 pp; vs N's
+   −30.1 pp). Same realism floor as N, less clock-reading skill to lose.
+   Raw JSON: `weights/dqn_ablate_q_transfer_probe.json` (untracked).
+3. **Ablation R is DONE** — run 28946597726 (`ablate-r-realism-env` @
+   `a31cfee`) completed 2026-07-08 ~18:38Z. **Best 64.2%** (worker 8,
+   ep 2999; tropical 77.6% / strong-shear 52.0% / calm 100%), worker mean
+   44.9% ± 8.8 pp, all 10 workers ≥ 36.5% (no floor-sitters). Step-4
+   sanity check PASSES decisively: far above the ~7% random floor and the
+   probe's 16% transfer bound — the realism env is learnable without the
+   oracle clock. (Reminder: R/S/T scores are NOT comparable to H–Q.)
+   Artifacts: `weights/dqn_ablate_r.pt`, `weights/dqn_ablate_r_summary.json`
+   (untracked, per J–N convention).
+4. **S and T are training in parallel** in a separate org (`Minevra-co`
+   — its Actions concurrency pool is separate from the personal account,
+   so they never contended with R): S = Minevra-co/loon-ablate-s run
+   28948653461 @ `cc8f95c`; T = Minevra-co/loon-ablate-t run 28967213334
+   @ `8cff727` (= `ad02ab6` + CI-nudge commits — T's train.yml wasn't
+   registered by GitHub until a commit touched the workflow file itself;
+   empty commits don't trigger indexing). User waived the wait-for-R gate
+   when creating the org; R's subsequent sanity pass vindicated that.
+   Both smoke-tested, CI trios rewired, replay/gif registries updated;
+   PRs in the main repo: S #4, T #6. The org pool runs ~5–6 jobs at a
+   time, so S/T interleave in waves (longer wall clock, hands-off).
+
+5. **Step-6 readout is DONE** (S run completed 2026-07-09, T 2026-07-10)
+   — but NOT on in-run scores: those are winner's-cursed in the realism
+   env (per-seed TWR50 stdev ±31–38 pp; R's in-run 64.2% → 38.4% clean).
+   Clean 10-seed re-eval of each winner checkpoint (probe protocol, seeds
+   42+i·1,000,003, 72h; scripts `scratch/reeval_{r,s,t}.py`, JSONs
+   `weights/dqn_ablate_{r,s,t}_reeval.json`):
+   - R: realism **38.4%** / legacy 40.4%  (in-run: 64.2% best, 44.9% mean)
+   - S: realism **37.8%** / legacy 38.5%  (in-run: 57.3% best, 50.5% mean)
+   - T: realism **20.7%** / legacy 12.0%  (in-run: 41.4% best, 30.4% mean)
+
+   Verdict: **S ≈ R exactly** (paired per-episode Δ −1.7 pp, t=−0.33,
+   n=30) — phase info is not load-bearing in the realism env; the
+   "all ≈ R" branch of the decision rules. **T ≪ R** (paired Δ −19.4 pp,
+   t=−3.4; legacy Δ −38.8 pp, t=−6.7) — the GRU arm roughly halves the
+   feedforward floor, extending the M/O/P/Q anti-recurrence pattern.
+   R and S are env-invariant (~38–40% both envs); N was not (46→16).
+   Full writeup: README "Realism Era (R / S / T)" section (this branch,
+   PR #8).
+
+ALL return-checklist steps are now complete. Optional leftovers: Q replay
+GIFs (registry entries exist on the Q branch); R/S/T replay GIFs (registry
+entries exist on their branches); merge decisions for PRs #3/#4/#6/#8.
+
+---
+
 State of play when this session paused, and exactly what to do on return.
 Written from the `ablate-q-per-step-option-critic` worktree session that built
 Ablations Q and R. Companion background: the Ablation Lineage table in
