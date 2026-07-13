@@ -87,7 +87,7 @@ ENV_FLAGS = {
         'use_reward_fix':     True,
         'use_shaping':        True,
         'use_expanded_state': False,
-        'use_time_features':  True,             # 20 -> 24 dim (same as L/M)
+        'use_time_features':  True,             # 20 -> 24 dim (same as L/M/N)
         'shaping_beta':       0.5,
         'shaping_gamma':      0.97,
         'terminal_twr_bonus': 50.0,

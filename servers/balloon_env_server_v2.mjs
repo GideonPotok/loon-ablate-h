@@ -545,6 +545,8 @@ function handleReset(req) {
             shapingLinear,
             shapingDMax,
             terminalTwrBonus,
+            shapingLinear,
+            shapingDMax,
         },
         prevDist: haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON),
     };
