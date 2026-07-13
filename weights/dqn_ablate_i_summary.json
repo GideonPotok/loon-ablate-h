@@ -1,0 +1,19 @@
+{
+  "ablation": "I_linear_potential_shaping",
+  "winner_worker": 0,
+  "best_score": 0.06880144032921812,
+  "best_episode": 4,
+  "best_per_preset": {
+    "tropical": 0.10686728395061729,
+    "strong-shear": 0.05941358024691359,
+    "calm": 0.06828703703703703
+  },
+  "n_workers": 1,
+  "workers": [
+    {
+      "worker_id": 0,
+      "best_score": 0.06880144032921812,
+      "best_episode": 4
+    }
+  ]
+}
