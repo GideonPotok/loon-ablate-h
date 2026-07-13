@@ -4,6 +4,7 @@ replay.py — Run the trained agent and plot its behaviour.
 Usage:
     python replay.py                        # uses best weight (w00)
     python replay.py --weight weights/final-ablate-h/dqn_ablate_h.pt
+    python replay.py --ablation k2          # v2 server + that ablation's env flags
     python replay.py --preset tropical      # single preset
     python replay.py --duration 43200       # 12-hour episode (default 72h)
     python replay.py --seed 7
@@ -42,6 +43,89 @@ PRESET_COLORS = {
     'calm':         '#27ae60',
 }
 
+# Env flags as actually used at training time (mirrors make_gif.py).
+# server_version='v2' for both; K2 = 20-dim state, L = 24-dim w/ Fourier time features.
+ABLATION_ENV_FLAGS = {
+    'k2': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,            # exponential shaping
+        'shaping_D_max':      500_000.0,        # tau = 500 km
+    },
+    'l': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
+    'm': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim (same as L)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
+    'q': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  True,             # 20 -> 24 dim (same as L/M)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+    },
+    'r': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  False,            # oracle removed — 20-dim
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      500_000.0,
+        # Realism bundle — replays must run in the env R trained in
+        'wind_phase_jitter':  True,
+        'wind_episode_noise': True,
+        'wind_param_jitter':  True,
+        'domain_rand':        True,
+    },
+}
+ABLATION_LABELS = {
+    'k2': 'Ablation K2 (exp shaping, tau=500km)',
+    'l':  'Ablation L (+ Fourier time features)',
+    'm':  'Ablation M (option-critic + GRU-64)',
+    'q':  'Ablation Q (option-critic, per-step cadence)',
+    'r':  'Ablation R (realism floor, no oracle features)',
+}
+# Architecture overrides not recoverable from the checkpoint's saved config
+# (QRAgent.state_dict() only persists the feedforward-relevant fields).
+ABLATION_AGENT_KWARGS = {
+    'm': {
+        'use_recurrent': True, 'use_options': True,
+        'n_options': 4, 'gru_hidden': 64,
+    },
+    'q': {
+        'use_recurrent': True, 'use_options': True,
+        'n_options': 4, 'gru_hidden': 64,
+    },
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def m_to_deg_lat(m): return m / 111_320
@@ -50,7 +134,7 @@ def m_to_deg_lon(m, lat_deg=STATION_LAT):
     return m / (111_320 * math.cos(math.radians(lat_deg))) if lat_deg != 90 else 0
 
 
-def load_agent(weight_path: Path) -> QRAgent:
+def load_agent(weight_path: Path, agent_kwargs: dict | None = None) -> QRAgent:
     ckpt = torch.load(str(weight_path), map_location='cpu', weights_only=False)
     cfg_d = ckpt.get('config', {})
     config = QRConfig(
@@ -61,6 +145,7 @@ def load_agent(weight_path: Path) -> QRAgent:
         cvar_alpha   = cfg_d.get('cvar_alpha',   1.0),
         epsilon_end  = 0.0,   # greedy at eval
         device       = 'cpu',
+        **(agent_kwargs or {}),
     )
     agent = QRAgent(config)
     agent.policy_net.load_state_dict(ckpt['policy_net'])
@@ -68,9 +153,12 @@ def load_agent(weight_path: Path) -> QRAgent:
     return agent
 
 
-def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int) -> dict:
+def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
+                server_version: str = 'v1', flags: dict | None = None) -> dict:
     """Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius."""
-    env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed, server_version='v1')
+    env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
+                     server_version=server_version, flags=flags)
+    agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
 
     traj = {k: [] for k in ('time_s', 'lat', 'lon', 'alt_m', 'dist_m', 'action', 'reward', 'in_radius')}
@@ -78,7 +166,7 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int) -> di
     step = 0
 
     while not done:
-        action = agent.select_action(state)
+        action = agent.select_action(state, greedy=True)
         next_state, reward, done, info = env.step(action)
 
         time_s  = info.get('time_s',  step * 300)
@@ -241,33 +329,42 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weight', default='weights/worker-0/dqn_ablate_h_w00.pt',
                         help='Path to .pt checkpoint')
+    parser.add_argument('--ablation', default=None, choices=sorted(ABLATION_ENV_FLAGS),
+                        help='If set, replays with that ablation\'s training-time env '
+                             'flags + v2 server (e.g. k2, l). Omit for plain v1 (e.g. H).')
     parser.add_argument('--preset', default=None,
                         help='One of: tropical, strong-shear, calm  (default: all three)')
     parser.add_argument('--duration', type=float, default=3600 * 72,
                         help='Episode length in seconds (default: 72h)')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--label', default='Ablation H (w00)',
-                        help='Title label for the plot')
-    parser.add_argument('--out-prefix', default='replay',
-                        help='Output filename prefix (default: replay)')
+    parser.add_argument('--label', default=None,
+                        help='Title label for the plot (default: derived from --ablation)')
+    parser.add_argument('--out-prefix', default=None,
+                        help='Output filename prefix (default: derived from --ablation, else "replay")')
     args = parser.parse_args()
 
     weight_path = Path(args.weight)
     if not weight_path.exists():
         raise FileNotFoundError(f'Weight file not found: {weight_path}')
 
+    server_version = 'v2' if args.ablation else 'v1'
+    flags          = ABLATION_ENV_FLAGS.get(args.ablation)
+    label          = args.label or ABLATION_LABELS.get(args.ablation, 'Ablation H (w00)')
+    out_prefix     = args.out_prefix or (f'replay_ablate_{args.ablation}' if args.ablation else 'replay')
+
     print(f'Loading agent from {weight_path}')
-    agent = load_agent(weight_path)
+    agent = load_agent(weight_path, ABLATION_AGENT_KWARGS.get(args.ablation))
     agent.epsilon = 0.0
 
     presets = [args.preset] if args.preset else PRESETS
 
     for preset in presets:
         print(f'\nRunning {preset} ({args.duration/3600:.0f} h)...')
-        traj = run_episode(agent, preset, args.duration, args.seed)
+        traj = run_episode(agent, preset, args.duration, args.seed,
+                           server_version=server_version, flags=flags)
         print(f'  TWR50 = {traj["twr50"]*100:.1f}%  steps = {traj["n_steps"]}')
-        out = Path(f'{args.out_prefix}_{preset.replace("-","_")}.png')
-        plot_episode(traj, preset, out, label=args.label)
+        out = Path(f'{out_prefix}_{preset.replace("-","_")}.png')
+        plot_episode(traj, preset, out, label=label)
 
     print('\nDone.')
 

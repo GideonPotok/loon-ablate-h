@@ -13,11 +13,10 @@ import queue
 import time
 from pathlib import Path
 
-from ablate_i_train import worker_fn
+from ablate_r_train import worker_fn
 
 WEIGHTS_DIR    = Path(__file__).parent / "weights"
-WEIGHTS_PREFIX = "dqn_ablate_i"
-
+WEIGHTS_PREFIX = "dqn_ablate_r"
 
 class _LogQueue:
     def __init__(self, worker_id: int):

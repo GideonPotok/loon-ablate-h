@@ -358,28 +358,67 @@ function handleReset(req) {
     const spawnOffsetKm = (req.spawn_offset_km != null) ? +req.spawn_offset_km : SPAWN_OFFSET_KM;
 
     // ── v2 feature flags (passed per-episode from the Python trainer) ────────
-    const useRewardFix    = !!req.use_reward_fix;
-    const useShaping      = !!req.use_shaping;
-    const useExpandedState = !!req.use_expanded_state;  // wired in step 5
+    const useRewardFix     = !!req.use_reward_fix;
+    const useShaping       = !!req.use_shaping;
+    const useExpandedState = !!req.use_expanded_state;
     const useTimeFeatures  = !!req.use_time_features;   // append 4 Fourier scalars → +4 dim
-    const shapingBeta     = (req.shaping_beta != null) ? +req.shaping_beta : 0.5;
-    const shapingGamma    = (req.shaping_gamma != null) ? +req.shaping_gamma : 0.97;
+    const shapingBeta      = (req.shaping_beta   != null) ? +req.shaping_beta   : 0.5;
+    const shapingGamma     = (req.shaping_gamma  != null) ? +req.shaping_gamma  : 0.97;
+    const shapingLinear    = !!req.shaping_linear;
+    const shapingDMax      = (req.shaping_D_max  != null) ? +req.shaping_D_max  : 500_000;
     const terminalTwrBonus = (req.terminal_twr_bonus != null) ? +req.terminal_twr_bonus : 50.0;
-    const shapingLinear   = !!req.shaping_linear;
-    const shapingDMax     = (req.shaping_D_max != null)
-        ? +req.shaping_D_max
-        : 10 * runtime.platform.STATION_RADIUS_M;   // 500 km default
+
+    // ── Realism flags (per-episode stochastic wind + sensing randomization) ──
+    const windPhaseJitter  = !!req.wind_phase_jitter;    // φ_igw, φ_pw ~ U[0,2π)
+    const windEpisodeNoise = !!req.wind_episode_noise;   // episode seed into noise hash
+    const windParamJitter  = !!req.wind_param_jitter;    // IGW/PW amplitude × logU[0.7,1.4]
+    const domainRand       = !!req.domain_rand;          // degrader σ-scale + forecast lag
+    const useEstimatedPhaseFeatures = !!req.use_estimated_phase_features;
+    if (useEstimatedPhaseFeatures && useTimeFeatures) {
+        return { ok: false, error: 'use_estimated_phase_features and use_time_features are mutually exclusive' };
+    }
 
     const layers = WIND_PRESETS[preset]?.layers;
     if (!layers) return { ok: false, error: `Unknown preset: ${preset}` };
 
-    // Wind functions
-    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t);
+    // Per-episode wind mods. Dedicated RNG stream (not the spawn RNG, whose
+    // draw order must stay untouched for old ablations). All five values are
+    // drawn unconditionally so a given seed yields the same φ/scale/noise
+    // realization regardless of which sub-flags are enabled.
+    let windMods = null;
+    if (windPhaseJitter || windEpisodeNoise || windParamJitter) {
+        const windRng  = makeRng((seed + 424243) >>> 0);
+        const d1 = windRng(), d2 = windRng(), d3 = windRng(), d4 = windRng(), d5 = windRng();
+        const logAmp = (x) => Math.exp(Math.log(0.7) + x * (Math.log(1.4) - Math.log(0.7)));
+        windMods = {
+            igwPhaseOffset: windPhaseJitter  ? d1 * 2 * Math.PI : 0,
+            pwPhaseOffset:  windPhaseJitter  ? d2 * 2 * Math.PI : 0,
+            igwAmpScale:    windParamJitter  ? logAmp(d3) : 1,
+            pwAmpScale:     windParamJitter  ? logAmp(d4) : 1,
+            noiseSeed:      windEpisodeNoise ? (d5 * 0x7FFFFFFF) | 0 : 0,
+        };
+    }
+
+    // Wind functions — every consumer (physics, degrader, observer, EKF) goes
+    // through truthWindFn, so the modded wind stays self-consistent everywhere.
+    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t, windMods);
     const baseWindFn   = (alt_m)    => getBaseWind(layers, alt_m);
 
     // Sensing stack: ForecastDegrader → WindObserver → WindEKF
+    // Domain randomization (port of js/rl_trainer.js createSensingStack drOpts):
+    // per-episode σ-scale on the calibrated bias/noise sigmas + a random
+    // forecast lag, sampled from a third dedicated RNG stream.
     const degraderSeed = 7777 + ((seed >>> 0) % 100000);
-    const degrader     = new ForecastDegrader(truthWindFn, baseWindFn, { SEED: degraderSeed });
+    const degraderOpts = { SEED: degraderSeed };
+    if (domainRand) {
+        const drRng      = makeRng((seed + 848487) >>> 0);
+        const sigmaScale = Math.exp(Math.log(0.5) + drRng() * (Math.log(2.0) - Math.log(0.5)));
+        degraderOpts.BIAS_SIGMA     = 0.71 * sigmaScale;   // calibrated values from
+        degraderOpts.NOISE_SIGMA    = 2.93 * sigmaScale;   // wind_degrader.DEGRADER_DEFAULTS
+        degraderOpts.STALENESS_MODE = 'lagged';
+        degraderOpts.LAG_S          = drRng() * 21600;     // U[0, 6h]
+    }
+    const degrader     = new ForecastDegrader(truthWindFn, baseWindFn, degraderOpts);
     const forecastFn   = (alt_m, t) => degrader.getForecastWind(alt_m, t);
     const observer     = new WindObservationStore();
     const ekf          = new WindEKF();
@@ -401,11 +440,69 @@ function handleReset(req) {
         return ekf.initialized ? ekf.getUncertainty(alt_m) : MAX_UNCERTAINTY;
     }
 
+    // IGW phase estimator — online complex demodulation of GPS-wind residuals
+    // at the nominal IGW frequency. Uses only real-life-available signals:
+    // the balloon's own GPS-derived winds and a climatological base wind.
+    // Generative model: u = A·cosθ, v = 0.7A·sinθ, θ = ωt − k·alt + φ₀, so
+    //   z = r_u + i·r_v/0.7 ≈ A·e^{iθ};  y = z·e^{−i(ωt−k·alt)} ≈ A·e^{iφ₀}.
+    // An EMA of y over ~one IGW period gives φ̂₀ = arg(ȳ), Â = |ȳ| (other
+    // components — PW, diurnal, noise — rotate after demodulation and average
+    // out, standard lock-in behavior).
+    const est = { re: 0, im: 0, conf: 0, lastT: null };
+    function estClockPhase(alt_m, t) {
+        return (2 * Math.PI * t) / runtime.wind.IGW_PERIOD_S -
+               (2 * Math.PI * alt_m) / runtime.wind.IGW_VERT_WAVELENGTH_M;
+    }
+    // The drift-derived obs wind equals the wind the physics sampled at the
+    // step-START altitude and time, so attribute it exactly there: the base
+    // subtraction becomes exact within a layer (no boundary-crossing pulses,
+    // which on strong shear are several m/s — bigger than the IGW itself) and
+    // the demodulation basis matches where the wave was actually sampled.
+    function estimatorUpdate(obs, altSampled, tSampled) {
+        const base = baseWindFn(altSampled);
+        const ru = obs.u_obs - base.u;
+        const rv = (obs.v_obs - base.v) / 0.7;
+        const ph = estClockPhase(altSampled, tSampled);
+        const c = Math.cos(ph), s = Math.sin(ph);
+        const yre = ru * c + rv * s;      // y = z·e^{−i·ph}
+        const yim = rv * c - ru * s;
+        const dt = est.lastT == null ? PHYSICS_DT_S : Math.max(1e-9, tSampled - est.lastT);
+        // 2× the IGW period: narrower passband so PW/diurnal leakage from the
+        // balloon's irregular altitude wander averages out (1× left the phasor
+        // beating ±40° on real trajectories).
+        const a = 1 - Math.exp(-dt / (2 * runtime.wind.IGW_PERIOD_S));
+        est.re   += a * (yre - est.re);
+        est.im   += a * (yim - est.im);
+        est.conf += a * (1 - est.conf);
+        est.lastT = tSampled;
+    }
+    function phaseFeatures(alt_m, t) {
+        const amp  = Math.hypot(est.re, est.im);
+        const phi0 = amp > 1e-12 ? Math.atan2(est.im, est.re) : 0;
+        const th   = estClockPhase(alt_m, t) + phi0;
+        return [Math.sin(th), Math.cos(th),
+                Math.min(1, amp / runtime.wind.IGW_AMPLITUDE), est.conf];
+    }
+    function phaseDebug() {
+        const amp  = Math.hypot(est.re, est.im);
+        return {
+            true_igw_offset: windMods ? windMods.igwPhaseOffset : 0,
+            est_igw_offset:  amp > 1e-12 ? Math.atan2(est.im, est.re) : 0,
+            est_amp:         amp,
+            conf:            est.conf,
+        };
+    }
+
     function stepSensing(state, prev, dt_s, t) {
         ekf.predict(dt_s);
         if (prev) {
             const obs = observer.observe(state, prev, dt_s, t);
-            if (obs) ekf.update(obs.alt_m, obs.u_obs, obs.v_obs);
+            if (obs) {
+                ekf.update(obs.alt_m, obs.u_obs, obs.v_obs);
+                if (useEstimatedPhaseFeatures) {
+                    estimatorUpdate(obs, prev.alt_m, t - dt_s);
+                }
+            }
         }
     }
 
@@ -429,7 +526,8 @@ function handleReset(req) {
         totalNavSteps:    0,
         targetLat:        TARGET_LAT,
         targetLon:        TARGET_LON,
-        sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn },
+        sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn,
+                            phaseFeatures, phaseDebug },
 
         // v2 flags + sub-knobs (frozen for the episode)
         flags: {
@@ -437,8 +535,15 @@ function handleReset(req) {
             useShaping,
             useExpandedState,
             useTimeFeatures,
+            useEstimatedPhaseFeatures,
+            windPhaseJitter,
+            windEpisodeNoise,
+            windParamJitter,
+            domainRand,
             shapingBeta,
             shapingGamma,
+            shapingLinear,
+            shapingDMax,
             terminalTwrBonus,
             shapingLinear,
             shapingDMax,
@@ -451,9 +556,12 @@ function handleReset(req) {
         ? extractStateV2(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON,
                          uncertaintyFn, 0, ep.totalPhysics, 0, dist /* prevDist == dist on reset */)
         : extractState(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON, uncertaintyFn);
-    if (useTimeFeatures) {
+    if (ep.flags.useTimeFeatures) {
         // time_s=0 on reset: sin(0)=0, cos(0)=1 for both periods — correct initial phase.
         statVec = [...statVec, 0, 1, 0, 1];
+    } else if (ep.flags.useEstimatedPhaseFeatures) {
+        // No observations yet: φ̂₀=0, amp=0, confidence=0.
+        statVec = [...statVec, ...phaseFeatures(balloon.alt_m, 0)];
     }
 
     return {
@@ -508,9 +616,10 @@ function handleStep(req) {
     }
 
     // Potential-based reward shaping (Ng/Harada/Russell 1999) — Phase v2 step 4.
-    // Φ(s) = β · exp(-d/(2R)). Adds F = γ·Φ(s') − Φ(s), which is policy-invariant.
-    // For the terminal state we follow Ng et al.: Φ(s_terminal) = 0, so on the last step
-    // shaping reduces to F = -Φ(s) (still cheap to evaluate; preserves optimality).
+    // Linear:      Φ(s) = β · max(0, 1 − d/D_max)   (hard cutoff at D_max)
+    // Exponential: Φ(s) = β · exp(−d/τ)              (τ = shaping_D_max; fallback 2R)
+    // Adds F = γ·Φ(s') − Φ(s), which is policy-invariant.
+    // For the terminal state: Φ(s_terminal) = 0, so shaping reduces to F = −Φ(s).
     if (ep.flags.useShaping) {
         const R    = runtime.platform.STATION_RADIUS_M;
         const beta = ep.flags.shapingBeta;
@@ -520,7 +629,7 @@ function handleStep(req) {
             phiPrev = beta * Math.max(0, 1 - ep.prevDist / D);
             phiNext = done ? 0.0 : beta * Math.max(0, 1 - dist / D);
         } else {
-            const tau = 2.0 * R;
+            const tau = ep.flags.shapingDMax || (2.0 * R);
             phiPrev = beta * Math.exp(-ep.prevDist / tau);
             phiNext = done ? 0.0 : beta * Math.exp(-dist / tau);
         }
@@ -550,6 +659,8 @@ function handleStep(req) {
             Math.sin(2 * Math.PI * time_s / PW_S),
             Math.cos(2 * Math.PI * time_s / PW_S),
         ];
+    } else if (ep.flags.useEstimatedPhaseFeatures) {
+        stateVec = [...stateVec, ...sensing.phaseFeatures(balloon.alt_m, time_s)];
     }
 
     // Now update prevDist for next-step shaping / diagnostics.
@@ -560,7 +671,12 @@ function handleStep(req) {
         state:  stateVec,
         reward,
         done,
-        info: { dist_m: dist, twr50, time_s, alt_m: balloon.alt_m, lat: balloon.lat, lon: balloon.lon },
+        info: {
+            dist_m: dist, twr50, time_s, alt_m: balloon.alt_m,
+            lat: balloon.lat, lon: balloon.lon,
+            ...(ep.flags.useEstimatedPhaseFeatures
+                ? { phase_debug: sensing.phaseDebug() } : {}),
+        },
     };
 }
 

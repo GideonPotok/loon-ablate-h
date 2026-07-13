@@ -58,6 +58,7 @@ class QRConfig:
     seed:              int   = 42
     device:            str   = 'cpu'
     train_batches_per_step: int = 2
+    grad_clip_norm:    Optional[float] = None  # clip ||grad|| before optimizer.step(); None = off
 
     # ── Phase 2-v2 feature flags ─────────────────────────────────────────────
     # All default to False so existing training behaviour is unchanged.
@@ -294,7 +295,7 @@ class QRAgent:
                 q = self.policy_net(x).squeeze(0)   # (A, N)
         return self._cvar_of_q(q)
 
-    def _select_action_options(self, state: np.ndarray) -> int:
+    def _select_action_options(self, state: np.ndarray, greedy: bool = False) -> int:
         """Option-Critic action selection: terminate→reselect ω, then sample a∼π_ω."""
         c = self.config
         x = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -312,7 +313,7 @@ class QRAgent:
 
         if self._current_option is None:
             # Episode start: pick greedy option (with ε-exploration over options).
-            if self.rng.random() < self.epsilon:
+            if not greedy and self.rng.random() < self.epsilon:
                 self._current_option = int(self.rng.integers(c.n_options))
             else:
                 self._current_option = int(v_omega.argmax().item())
@@ -321,7 +322,7 @@ class QRAgent:
             b = float(bet[self._current_option].item())
             if self.rng.random() < b:
                 # Terminated → pick new option (greedy, with ε-exploration).
-                if self.rng.random() < self.epsilon:
+                if not greedy and self.rng.random() < self.epsilon:
                     self._current_option = int(self.rng.integers(c.n_options))
                 else:
                     self._current_option = int(v_omega.argmax().item())
@@ -389,12 +390,13 @@ class QRAgent:
         action = int(cvar_q.argmax().item())
         return action, float(mean_q[action].item()), float(cvar_q[action].item()), None
 
-    def select_action(self, state: np.ndarray) -> int:
+    def select_action(self, state: np.ndarray, greedy: bool = False) -> int:
+        """greedy=True suppresses ε-exploration entirely — use for eval, never for training rollouts."""
         if self.config.use_recurrent and self._inference_hidden is None:
             self.reset_hidden()
         if self.config.use_options:
-            return self._select_action_options(state)
-        if self.rng.random() < self.epsilon:
+            return self._select_action_options(state, greedy=greedy)
+        if not greedy and self.rng.random() < self.epsilon:
             # Even on a random action we must advance the recurrent state.
             if self.config.use_recurrent:
                 _ = self._q_values(state)
@@ -402,6 +404,10 @@ class QRAgent:
         return int(self._q_values(state).argmax().item())
 
     # ── Training ──────────────────────────────────────────────────────────────
+
+    def _clip_grad(self) -> None:
+        if self.config.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.config.grad_clip_norm)
 
     def train_batch(self, replay_buffer: PrioritizedReplayBuffer) -> Optional[float]:
         c = self.config
@@ -444,6 +450,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         replay_buffer.update_priorities(indices, per_sample_loss.detach().cpu().numpy())
@@ -534,6 +541,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         loss_val = float(loss.item())
@@ -693,6 +701,7 @@ class QRAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        self._clip_grad()
         self.optimizer.step()
 
         loss_val = float(loss.item())
