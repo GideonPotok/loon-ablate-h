@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 
 WEIGHTS_DIR    = Path(__file__).parent / "weights"
-WEIGHTS_PREFIX = "dqn_ablate_s"
+WEIGHTS_PREFIX = "dqn_ablate_t"
 
 def main():
     json_files = sorted(WEIGHTS_DIR.glob(f"{WEIGHTS_PREFIX}_w*.json"))
@@ -53,7 +53,7 @@ def main():
     shutil.copy2(winner_src, winner_dst)
 
     summary = {
-        "ablation":          "S_estimated_phase_features",
+        "ablation":          "T_gru_memory",
         "winner_worker":     winner["worker_id"],
         "best_score":        winner["best_score"],
         "best_episode":      winner["best_episode"],

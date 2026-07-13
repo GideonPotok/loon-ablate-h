@@ -1,4 +1,4 @@
-name: Train Ablation S (estimated phase features)
+name: Train Ablation T (GRU memory arm)
 
 on:
   workflow_dispatch:
@@ -37,8 +37,8 @@ jobs:
         with:
           name: worker-${{ matrix.worker_id }}
           path: |
-            weights/dqn_ablate_s_w*.pt
-            weights/dqn_ablate_s_w*.json
+            weights/dqn_ablate_t_w*.pt
+            weights/dqn_ablate_t_w*.json
 
   collect:
     name: Collect & Pick Winner
@@ -68,8 +68,8 @@ jobs:
       - name: Upload final weights + summary
         uses: actions/upload-artifact@v4
         with:
-          name: final-ablate-s
+          name: final-ablate-t
           retention-days: 90
           path: |
-            weights/dqn_ablate_s.pt
-            weights/dqn_ablate_s_summary.json
+            weights/dqn_ablate_t.pt
+            weights/dqn_ablate_t_summary.json
