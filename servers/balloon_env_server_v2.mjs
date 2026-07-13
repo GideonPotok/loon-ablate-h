@@ -545,6 +545,8 @@ function handleReset(req) {
             shapingLinear,
             shapingDMax,
             terminalTwrBonus,
+            shapingLinear,
+            shapingDMax,
         },
         prevDist: haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON),
     };
@@ -671,6 +673,7 @@ function handleStep(req) {
         done,
         info: {
             dist_m: dist, twr50, time_s, alt_m: balloon.alt_m,
+            lat: balloon.lat, lon: balloon.lon,
             ...(ep.flags.useEstimatedPhaseFeatures
                 ? { phase_debug: sensing.phaseDebug() } : {}),
         },
