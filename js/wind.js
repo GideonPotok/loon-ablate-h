@@ -85,9 +85,23 @@ export function getBaseWind(layers, alt_m) {
 /**
  * Apply temporal variation to base wind.
  * Includes diurnal cycle, inertia-gravity waves, planetary waves, and noise.
+ *
+ * `mods` (optional) injects per-episode randomness:
+ *   { igwPhaseOffset, pwPhaseOffset,   // radians, added to the wave phases
+ *     igwAmpScale, pwAmpScale,         // multiplicative amplitude scales
+ *     noiseSeed }                      // int32 mixed into the background-noise hash
+ * With mods omitted/null every term reduces to an exact IEEE-754 identity
+ * (x+0, x*1, imul(0,·)=0), so legacy callers are bit-reproducible.
+ * The diurnal tide takes no offset on purpose: the solar tide is genuinely
+ * clock-locked in reality, unlike IGW/PW phase.
  */
-export function applyTemporalVariation(baseU, baseV, alt_m, time_s) {
+export function applyTemporalVariation(baseU, baseV, alt_m, time_s, mods = null) {
     const w = runtime.wind;
+    const igwPhaseOffset = mods?.igwPhaseOffset ?? 0;
+    const pwPhaseOffset  = mods?.pwPhaseOffset  ?? 0;
+    const igwAmpScale    = mods?.igwAmpScale    ?? 1;
+    const pwAmpScale     = mods?.pwAmpScale     ?? 1;
+    const noiseSeed      = mods?.noiseSeed      ?? 0;
     let u = baseU, v = baseV;
 
     // 1. Diurnal thermal tide (24h period)
@@ -101,21 +115,24 @@ export function applyTemporalVariation(baseU, baseV, alt_m, time_s) {
 
     // 2. Inertia-gravity wave (IGW) — altitude-dependent phase
     const igwPhase = (2 * Math.PI * time_s) / w.IGW_PERIOD_S -
-                     (2 * Math.PI * alt_m) / w.IGW_VERT_WAVELENGTH_M;
-    u += w.IGW_AMPLITUDE * Math.cos(igwPhase);
-    v += w.IGW_AMPLITUDE * 0.7 * Math.sin(igwPhase);  // elliptical hodograph
+                     (2 * Math.PI * alt_m) / w.IGW_VERT_WAVELENGTH_M +
+                     igwPhaseOffset;
+    u += w.IGW_AMPLITUDE * igwAmpScale * Math.cos(igwPhase);
+    v += w.IGW_AMPLITUDE * igwAmpScale * 0.7 * Math.sin(igwPhase);  // elliptical hodograph
 
     // 3. Planetary wave (multi-day, altitude-dependent)
     const pwPhase = (2 * Math.PI * time_s) / w.PW_PERIOD_S -
-                    (2 * Math.PI * alt_m) / w.PW_VERT_WAVELENGTH_M;
-    u += w.PW_AMPLITUDE * Math.sin(pwPhase);
-    v += w.PW_AMPLITUDE * 0.5 * Math.cos(pwPhase);
+                    (2 * Math.PI * alt_m) / w.PW_VERT_WAVELENGTH_M +
+                    pwPhaseOffset;
+    u += w.PW_AMPLITUDE * pwAmpScale * Math.sin(pwPhase);
+    v += w.PW_AMPLITUDE * pwAmpScale * 0.5 * Math.cos(pwPhase);
 
-    // 4. Stochastic gravity wave background (deterministic from time+alt seed)
+    // 4. Stochastic gravity wave background (deterministic from time+alt seed;
+    //    Math.imul keeps the episode-seed mix in exact int32 space)
     const slot = Math.floor(time_s / 1800);
     const altBin = Math.floor(alt_m / 500);
-    const seed = ((slot * 7919 + altBin * 104729) & 0x7FFFFFFF) / 0x7FFFFFFF;
-    const seed2 = ((slot * 104729 + altBin * 7919) & 0x7FFFFFFF) / 0x7FFFFFFF;
+    const seed = ((slot * 7919 + altBin * 104729 + Math.imul(noiseSeed, 15485863)) & 0x7FFFFFFF) / 0x7FFFFFFF;
+    const seed2 = ((slot * 104729 + altBin * 7919 + Math.imul(noiseSeed, 2654435761)) & 0x7FFFFFFF) / 0x7FFFFFFF;
     u += w.NOISE_STD * (seed * 2 - 1);
     v += w.NOISE_STD * (seed2 * 2 - 1);
 
@@ -126,9 +143,9 @@ export function applyTemporalVariation(baseU, baseV, alt_m, time_s) {
  * Get wind at (altitude, time) for a given set of layers.
  * Combines base wind + temporal variation.
  */
-export function getWind(layers, alt_m, time_s) {
+export function getWind(layers, alt_m, time_s, mods = null) {
     const base = getBaseWind(layers, alt_m);
-    return applyTemporalVariation(base.u, base.v, alt_m, time_s);
+    return applyTemporalVariation(base.u, base.v, alt_m, time_s, mods);
 }
 
 /**
