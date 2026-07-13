@@ -1,5 +1,4 @@
 name: Train Ablation Q (per-step option-critic)
-
 on:
   workflow_dispatch:
 
@@ -39,7 +38,6 @@ jobs:
           path: |
             weights/dqn_ablate_q_w*.pt
             weights/dqn_ablate_q_w*.json
-
   collect:
     name: Collect & Pick Winner
     needs: train

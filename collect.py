@@ -15,7 +15,6 @@ import torch
 WEIGHTS_DIR    = Path(__file__).parent / "weights"
 WEIGHTS_PREFIX = "dqn_ablate_q"
 
-
 def main():
     json_files = sorted(WEIGHTS_DIR.glob(f"{WEIGHTS_PREFIX}_w*.json"))
     if not json_files:

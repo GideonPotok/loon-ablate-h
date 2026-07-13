@@ -18,7 +18,6 @@ from ablate_q_train import worker_fn
 WEIGHTS_DIR    = Path(__file__).parent / "weights"
 WEIGHTS_PREFIX = "dqn_ablate_q"
 
-
 class _LogQueue:
     def __init__(self, worker_id: int):
         self._q   = queue.Queue()
