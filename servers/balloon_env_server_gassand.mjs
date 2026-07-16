@@ -158,13 +158,55 @@ function handleReset(req) {
     const layers = WIND_PRESETS[preset]?.layers;
     if (!layers) return { ok: false, error: `Unknown preset: ${preset}` };
 
-    // Wind functions
-    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t);
+    // ── Realism flags (per-episode stochastic wind + sensing randomization) ──
+    // Ported verbatim from the v2 server (balloon_env_server_v2.mjs) so an
+    // R_Gassand run trains/evals under the SAME realism bundle as R. All four
+    // are flag-gated and default off, so with no flags this env behaves exactly
+    // as the deterministic baseline (the plain gassand demonstrator is
+    // unaffected). See ablate_r_gassand_train.py.
+    const windPhaseJitter  = !!req.wind_phase_jitter;    // φ_igw, φ_pw ~ U[0,2π)
+    const windEpisodeNoise = !!req.wind_episode_noise;   // episode seed into noise hash
+    const windParamJitter  = !!req.wind_param_jitter;    // IGW/PW amplitude × logU[0.7,1.4]
+    const domainRand       = !!req.domain_rand;          // degrader σ-scale + forecast lag
+
+    // Per-episode wind mods on a DEDICATED RNG stream (seed+424243) — separate
+    // from the spawn RNG (makeRng(seed) below), whose draw order must stay
+    // untouched. Draw order matches v2 exactly so a given seed yields the same
+    // φ/amp/noise realization in both servers.
+    let windMods = null;
+    if (windPhaseJitter || windEpisodeNoise || windParamJitter) {
+        const windRng  = makeRng((seed + 424243) >>> 0);
+        const d1 = windRng(), d2 = windRng(), d3 = windRng(), d4 = windRng(), d5 = windRng();
+        const logAmp = (x) => Math.exp(Math.log(0.7) + x * (Math.log(1.4) - Math.log(0.7)));
+        windMods = {
+            igwPhaseOffset: windPhaseJitter  ? d1 * 2 * Math.PI : 0,
+            pwPhaseOffset:  windPhaseJitter  ? d2 * 2 * Math.PI : 0,
+            igwAmpScale:    windParamJitter  ? logAmp(d3) : 1,
+            pwAmpScale:     windParamJitter  ? logAmp(d4) : 1,
+            noiseSeed:      windEpisodeNoise ? (d5 * 0x7FFFFFFF) | 0 : 0,
+        };
+    }
+
+    // Wind functions — every consumer (physics, degrader, observer, EKF) goes
+    // through truthWindFn, so the modded wind stays self-consistent everywhere.
+    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t, windMods);
     const baseWindFn   = (alt_m)    => getBaseWind(layers, alt_m);
 
-    // Sensing stack: ForecastDegrader → WindObserver → WindEKF (identical to v1)
+    // Sensing stack: ForecastDegrader → WindObserver → WindEKF (v1 stack).
+    // Domain randomization (v2 port): per-episode σ-scale on the calibrated
+    // bias/noise sigmas + a random forecast lag, from a third dedicated RNG
+    // stream (seed+848487).
     const degraderSeed = 7777 + ((seed >>> 0) % 100000);
-    const degrader     = new ForecastDegrader(truthWindFn, baseWindFn, { SEED: degraderSeed });
+    const degraderOpts = { SEED: degraderSeed };
+    if (domainRand) {
+        const drRng      = makeRng((seed + 848487) >>> 0);
+        const sigmaScale = Math.exp(Math.log(0.5) + drRng() * (Math.log(2.0) - Math.log(0.5)));
+        degraderOpts.BIAS_SIGMA     = 0.71 * sigmaScale;   // calibrated defaults from
+        degraderOpts.NOISE_SIGMA    = 2.93 * sigmaScale;   // wind_degrader.DEGRADER_DEFAULTS
+        degraderOpts.STALENESS_MODE = 'lagged';
+        degraderOpts.LAG_S          = drRng() * 21600;     // U[0, 6h]
+    }
+    const degrader     = new ForecastDegrader(truthWindFn, baseWindFn, degraderOpts);
     const forecastFn   = (alt_m, t) => degrader.getForecastWind(alt_m, t);
     const observer     = new WindObservationStore();
     const ekf          = new WindEKF();

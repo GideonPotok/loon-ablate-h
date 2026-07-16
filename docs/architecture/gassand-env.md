@@ -125,6 +125,34 @@ env.close()
 `python demo_gassand.py` prints the three core behaviours (FLOAT holds; release
 amount → peak speed both ways; finite depletion).
 
+`replay_gassand.py` rolls out a policy (built-in wind-follower heuristic by
+default, or a gassand-trained QR-DQN via `--weight`) and renders a PNG + GIF with
+a **finite-reserve depletion panel** (helium & sand draining over time; the GIF
+adds live draining fuel-gauge bars).
+
+## Training on this env (deterministic vs realism)
+
+Two QR-DQN trainers ship for the gassand env, both using N/R's feedforward recipe
+(γ=0.99, target_update 25, lr 1e-4, batch 64, n-step 3, PER, [128,64], recovery
+spawn) and the plain station-keeping reward above:
+
+| script | wind | role |
+|--------|------|------|
+| `ablate_gassand_train.py`   | deterministic (no realism flags) | N-like floor / demonstrator |
+| `ablate_r_gassand_train.py` | R's 4 realism flags, train + eval | **R_Gassand** — transfer/robustness arm |
+
+`server_version='gassand'` honours the same four per-episode realism flags as the
+v2 server — `wind_phase_jitter`, `wind_episode_noise`, `wind_param_jitter`,
+`domain_rand` — ported into `handleReset` (dedicated RNG streams: `seed+424243`
+for wind mods, `seed+848487` for domain-rand; the spawn RNG is left untouched).
+All default **off**, so a run with no flags is byte-for-byte the deterministic
+baseline. R_Gassand deliberately keeps the plain reward (the realism bundle is
+its single information-structure change; v2's reward shaping is *not* ported).
+Because the physics, 21-dim state and 11-action head differ from v1/v2, gassand
+scores are **not** comparable to H–T — compare within the gassand family
+(deterministic demonstrator vs R_Gassand), and via a transfer probe once both
+checkpoints exist.
+
 ## Baking in a resource-aware reward (next step)
 
 The physics is intentionally decoupled from reward. To make resource use matter,
