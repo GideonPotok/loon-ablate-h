@@ -105,10 +105,10 @@ def load_agent(weight_path: Path):
     return agent
 
 
-def run_episode(preset: str, duration_s: float, seed: int, agent=None) -> dict:
+def run_episode(preset: str, duration_s: float, seed: int, agent=None, flags=None) -> dict:
     """Roll out one episode; return a dict of per-decision arrays."""
     env   = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
-                       server_version='gassand')
+                       server_version='gassand', flags=flags)
     state = env.reset()
     if agent is not None:
         agent.reset_hidden()      # no-op unless recurrent
@@ -436,18 +436,22 @@ def main():
     p.add_argument('--duration', type=float, default=3600 * 72, help='episode length (s), default 72h')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--no-gif', action='store_true', help='PNG only (skip the animated GIF)')
+    p.add_argument('--realism', action='store_true',
+                   help="Roll out under R's 4 realism flags (match an R_Gassand-trained policy)")
     args = p.parse_args()
 
     agent = None
     if args.weight:
         agent = load_agent(Path(args.weight))
     tag   = args.tag or ('learned' if args.weight else 'heuristic')
-    label = f'Gassand ({tag})'
+    flags = ({'wind_phase_jitter': True, 'wind_episode_noise': True,
+              'wind_param_jitter': True, 'domain_rand': True} if args.realism else None)
+    label = f'Gassand ({tag}{", realism" if flags else ""})'
 
     presets = [args.preset] if args.preset else PRESETS
     for preset in presets:
-        print(f'[{preset}] rolling out ({tag}) …')
-        traj = run_episode(preset, args.duration, args.seed, agent=agent)
+        print(f'[{preset}] rolling out ({tag}{", realism" if flags else ""}) …')
+        traj = run_episode(preset, args.duration, args.seed, agent=agent, flags=flags)
         print(f'  TWR50 {traj["twr50"]*100:.1f}%  ·  He {traj["he_left"]:.2f}kg left '
               f'(vented {traj["he_used"]:.2f})  ·  sand {traj["sand_left"]:.2f}kg left '
               f'(dropped {traj["sand_used"]:.2f})')
