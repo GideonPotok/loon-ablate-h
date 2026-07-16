@@ -11,6 +11,7 @@ export const EARTH_RADIUS_M = 6_371_000;
 export const G = 9.80665;
 export const R_AIR = 287.058;        // J/(kg·K) specific gas constant dry air
 export const HELIUM_MOLAR_MASS = 4.0026e-3; // kg/mol
+export const AIR_MOLAR_MASS    = 28.9647e-3; // kg/mol (dry air)
 
 // ── Balloon platform defaults ───────────────────────────────────────
 export const DEFAULT_PLATFORM = Object.freeze({
@@ -22,6 +23,39 @@ export const DEFAULT_PLATFORM = Object.freeze({
     ALT_MIN_M:                  15_000,
     ALT_MAX_M:                  22_000,
     STATION_RADIUS_M:           50_000,
+});
+
+// ── Gas-balloon (helium/sand) variant platform ──────────────────────
+// Used only by the gassand env server + js/balloon_gassand.js. Altitude is
+// controlled by venting finite helium (→ sink) and dropping finite sand
+// (→ rise), instead of the reversible air-ballast pump in DEFAULT_PLATFORM.
+// Defaults chosen (via the demo probe) to float ~17 km with both reserves
+// comfortably stocked and the envelope seated at its zero-pressure ceiling.
+export const DEFAULT_GASSAND = Object.freeze({
+    V_ENVELOPE_M3:     1000,     // envelope volume (superpressure ceiling)
+    DRY_MASS_KG:       100,      // fixed structure + payload (never changes)
+    // Launch is deliberately BALANCED: helium·(M_air/M_he − 1) ≈ DRY + sand, so
+    // the envelope is exactly full (zero-pressure ceiling) and net buoyancy ≈ 0.
+    // This is the ONLY regime where venting helium descends: with any surplus
+    // helium the envelope stays full and venting just sheds mass → the balloon
+    // would rise instead. 19.24165 = (DRY+SAND) / (28.9647/4.0026 − 1) = 120/6.236471.
+    HELIUM_INIT_KG:    19.24165, // lift gas aboard at launch (only depletes)
+    SAND_INIT_KG:      20.0,     // ballast sand aboard at launch (only depletes)
+    SAND_CAPACITY_KG:  20.0,     // = SAND_INIT_KG; used to normalise the gauge
+    HELIUM_CAPACITY_KG:19.24165, // = HELIUM_INIT_KG; used to normalise the gauge
+    M_AIR_KG_MOL:      28.9647e-3,
+    M_HE_KG_MOL:       4.0026e-3,
+    DRAG_COEFFICIENT:  0.47,     // sphere
+    MAX_VV_M_S:        2.5,      // vertical-velocity clamp (matches balloon.js)
+    ALT_MIN_M:         15_000,
+    ALT_MAX_M:         22_000,
+    STATION_RADIUS_M:  50_000,
+    // Per-decision release magnitudes (kg), smallest→largest. A tiny release
+    // gives a slow drift (v ∝ √amount), a large one a fast climb/dive. Helium
+    // amounts are the paired sand amounts ÷ 6.236 (net lift per kg He) so an
+    // "up" and its mirror "down" produce matched speeds. All tunable.
+    SAND_RELEASE_KG:   [0.005, 0.02, 0.08, 0.30, 1.00],   // → ~0.11 .. 1.56 m/s up
+    HELIUM_RELEASE_KG: [0.0008, 0.0032, 0.0128, 0.0481, 0.1604], // → ~0.11 .. 1.55 m/s down
 });
 
 // ── Navigator defaults ──────────────────────────────────────────────
@@ -118,6 +152,10 @@ export const runtime = {
     nav:      { ...DEFAULT_NAV },
     wind:     { ...DEFAULT_WIND_VARIATION },
     features: { ...NAV_FEATURES },
+
+    // Gas-balloon variant platform + its derived values (see balloon_gassand.js).
+    // balloonRadius_m / altBand*_m here are filled by recalculateGassandDerived().
+    gassand:  { ...DEFAULT_GASSAND, balloonRadius_m: 0, altBandLow_m: 0, altBandHigh_m: 0 },
 
     // Derived values (recomputed when platform changes)
     balloonRadius_m: 0,
