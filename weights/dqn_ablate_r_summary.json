@@ -1,0 +1,64 @@
+{
+  "ablation": "R_realism_floor_no_oracle",
+  "winner_worker": 8,
+  "best_score": 0.6424254115226338,
+  "best_episode": 2999,
+  "best_per_preset": {
+    "tropical": 0.7758487654320988,
+    "strong-shear": 0.5196759259259259,
+    "calm": 1.0
+  },
+  "n_workers": 10,
+  "workers": [
+    {
+      "worker_id": 0,
+      "best_score": 0.5001929012345678,
+      "best_episode": 3599
+    },
+    {
+      "worker_id": 1,
+      "best_score": 0.36541923868312753,
+      "best_episode": 3599
+    },
+    {
+      "worker_id": 2,
+      "best_score": 0.37069187242798357,
+      "best_episode": 3299
+    },
+    {
+      "worker_id": 3,
+      "best_score": 0.38303755144032925,
+      "best_episode": 1799
+    },
+    {
+      "worker_id": 4,
+      "best_score": 0.5364583333333334,
+      "best_episode": 3599
+    },
+    {
+      "worker_id": 5,
+      "best_score": 0.4322273662551441,
+      "best_episode": 2399
+    },
+    {
+      "worker_id": 6,
+      "best_score": 0.4217463991769548,
+      "best_episode": 3299
+    },
+    {
+      "worker_id": 7,
+      "best_score": 0.39094650205761317,
+      "best_episode": 3299
+    },
+    {
+      "worker_id": 8,
+      "best_score": 0.6424254115226338,
+      "best_episode": 2999
+    },
+    {
+      "worker_id": 9,
+      "best_score": 0.45055298353909456,
+      "best_episode": 3599
+    }
+  ]
+}
