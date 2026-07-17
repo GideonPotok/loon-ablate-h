@@ -13,10 +13,12 @@ per decision sets the size of the buoyancy imbalance, and drag turns that into a
 vertical speed: a *tiny* release drifts *slowly*, a *large* one climbs/dives
 *fast* (`v ∝ √amount`).
 
-This is the model requested for the team's real platform. It is deliberately a
-**physics-only** deliverable: the reward is still the plain v1 station-keeping
-shape, and the resource economy is exposed in `info` so a resource-aware reward
-can be layered on later without touching the dynamics.
+This is the model requested for the team's real platform. The physics is
+deliberately decoupled from reward: by default the reward is the plain v1
+station-keeping shape, with the resource economy exposed in `info`. A
+**resource-aware reward** is available behind the `use_resource_reward` flag
+(see below) — with the flag off, the reward path is byte-identical to the
+physics-only baseline.
 
 ## Files
 
@@ -136,10 +138,11 @@ Two QR-DQN trainers ship for the gassand env, both using N/R's feedforward recip
 (γ=0.99, target_update 25, lr 1e-4, batch 64, n-step 3, PER, [128,64], recovery
 spawn) and the plain station-keeping reward above:
 
-| script | wind | role |
-|--------|------|------|
-| `ablate_gassand_train.py`   | deterministic (no realism flags) | N-like floor / demonstrator |
-| `ablate_r_gassand_train.py` | R's 4 realism flags, train + eval | **R_Gassand** — transfer/robustness arm |
+| script | wind | reward | role |
+|--------|------|--------|------|
+| `ablate_gassand_train.py`   | deterministic (no realism flags) | plain | N-like floor / demonstrator |
+| `ablate_r_gassand_train.py` | R's 4 realism flags, train + eval | plain | **R_Gassand** — transfer/robustness arm |
+| `ablate_res_gassand_train.py` | R's 4 realism flags, train + eval | resource-aware | **Res_Gassand** — conservation arm |
 
 `server_version='gassand'` honours the same four per-episode realism flags as the
 v2 server — `wind_phase_jitter`, `wind_episode_noise`, `wind_param_jitter`,
@@ -153,18 +156,60 @@ scores are **not** comparable to H–T — compare within the gassand family
 (deterministic demonstrator vs R_Gassand), and via a transfer probe once both
 checkpoints exist.
 
-## Baking in a resource-aware reward (next step)
+## The multi-seed transfer probe
 
-The physics is intentionally decoupled from reward. To make resource use matter,
-add terms in `computeReward` / `handleStep` of the gassand server (all inputs are
-already in scope):
+Single-episode gassand scores are close to meaningless under realism — one
+realism episode's TWR50 swings ±35pp with the wind draw (the seed-42 calm render
+scored 44% against a 19.1% ± 16.6 ten-seed mean), and each trainer's in-run
+"best" is the max of a noisy eval sequence, i.e. winner's-cursed.
+`probe_gassand_transfer.py` is the honest instrument (the gassand analogue of
+`probe_realism_transfer.py`): fixed checkpoints, no retraining, evaluated in
+both environments × 3 presets × 10 seeds, composite `0.5·mean + 0.5·worst`.
+Because the realism port draws from dedicated RNG streams and leaves the spawn
+RNG untouched, seed *i* gives the identical spawn in both modes, so the probe
+also reports the spawn-luck-cancelling paired per-seed delta. End-of-episode
+reserves are averaged per cell alongside TWR.
 
-- **Per-release cost** — penalise `helium_released_kg` / `sand_released_kg` each
-  step (helium is the scarcer, one-way-down resource, so weight it higher).
-- **Terminal reserve bonus** — reward leftover `helium_kg` / `sand_kg` at episode
-  end to encourage frugal station-keeping.
-- **Depletion / floor penalty** — a large negative for running a reserve to zero
-  or pinning at `ALT_MIN`, which in this model is an unrecoverable state.
+Results (10 seeds, 72 h, `probe_gassand_transfer.json`, 2026-07-17):
 
-Keep the physics (`js/balloon_gassand.js`) untouched when doing so — only the
-reward assembly in the server needs to change.
+| policy | deterministic | realism | degradation |
+|--------|--------------|---------|-------------|
+| heuristic | 4.5% | 2.7% | +1.8pp |
+| `gassand` (det-trained) | 7.4% | 3.5% | +3.8pp |
+| `r_gassand` (realism-trained) | 7.3% | 5.5% | +1.8pp |
+
+The two learned policies tie on deterministic wind (7.4 vs 7.3) — realism
+training cost nothing on the clean env — while under realism the det-trained
+policy loses half its composite and R_Gassand keeps three quarters. And every
+cell of the table ends with sand ≈ 0.00 kg: the plain reward never penalises
+release, which motivates the section below.
+
+## The resource-aware reward (flag-gated)
+
+Switched on per reset with `use_resource_reward` (parsed in `handleReset`,
+applied in `stepAction`; physics untouched; all coefficients per-reset tunable):
+
+- **Per-release cost** — `−sand_cost_per_kg·sand_released −
+  helium_cost_per_kg·He_released` each step (defaults 2.0 / 25.0). Helium is
+  priced above its 6.236× lift equivalence because venting is doubly
+  irreversible: it lowers the ceiling permanently *and* arresting the resulting
+  descent costs sand.
+- **Terminal reserve bonus** — `terminal_reserve_bonus · mean(He gauge, sand
+  gauge)` at episode end (default 25.0).
+- **Depletion / floor penalty** — one-time `depletion_penalty` (default 25.0)
+  the first time either reserve runs dry, plus `floor_penalty` (default 0.1)
+  per step pinned at `ALT_MIN` — an unrecoverable state in this model.
+
+Calibration (from the probe's honest numbers): a plain-reward policy under
+realism earns roughly 60–200 base return per 72 h episode while spending all
+20 kg sand (cost 40) and ~3 kg He (cost ~80) — full waste costs about one
+episode's base return. The frugal pattern R_Gassand showed in its first 30 h
+(sand 64%, He 90%) costs ~20. FLOAT-forever nets only the terminal bonus, and
+1 kg of sand (cost 2) buys ≈ two in-radius steps, so strategic spending still
+dominates never-spending — the degenerate policies lose on both ends.
+
+`ablate_res_gassand_train.py` (**Res_Gassand**) trains with this reward on top
+of R_Gassand's realism bundle — the one-change-at-a-time step after R_Gassand.
+It checkpoints best-by-eval **return** (the trained objective), logging TWR and
+reserves alongside; cross-policy comparison stays with the probe, whose metrics
+(TWR + reserves) are reward-independent.

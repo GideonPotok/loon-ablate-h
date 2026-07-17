@@ -32,10 +32,12 @@
  *   [9..20] 4 × (u/20, v/20, uncertainty/10)
  *           at alts 16625, 17125, 17625, 18125 m
  *
- * REWARD is intentionally left as the v1 station-keeping shape (distance only) —
- * the resource economy is exposed in `info` (helium_kg, sand_kg, helium_vented_kg,
- * sand_dropped_kg) so a resource-aware reward can be layered on later without
- * touching the physics.
+ * REWARD defaults to the v1 station-keeping shape (distance only), with the
+ * resource economy exposed in `info` (helium_kg, sand_kg, helium_vented_kg,
+ * sand_dropped_kg). Passing use_resource_reward at reset switches on the
+ * resource-aware terms (per-release cost, depletion/floor penalties, terminal
+ * reserve bonus — see handleReset); with the flag off the reward path is
+ * byte-identical to the physics-only baseline. Physics is untouched either way.
  */
 
 import readline from 'readline';
@@ -133,7 +135,8 @@ function extractState(bState, getWindFn, time_s, targetLat, targetLon, getUncert
 
 /**
  * Station-keeping reward (v1 smooth shape). Resource cost is NOT included here;
- * it is exposed in `info` for a later resource-aware reward.
+ * it is applied in stepAction when use_resource_reward is set (and always
+ * exposed in `info` regardless).
  */
 function computeReward(dist_m) {
     const R       = runtime.gassand.STATION_RADIUS_M;
@@ -186,6 +189,25 @@ function handleReset(req) {
             noiseSeed:      windEpisodeNoise ? (d5 * 0x7FFFFFFF) | 0 : 0,
         };
     }
+
+    // ── Resource-aware reward (flag-gated, default OFF) ──
+    // With use_resource_reward the plain station-keeping reward is extended by:
+    //   • per-release cost: −sand_cost_per_kg·sand − helium_cost_per_kg·He.
+    //     Helium is priced above its 6.236× lift equivalence because venting is
+    //     doubly irreversible: it lowers the ceiling permanently AND arresting
+    //     the resulting descent costs sand.
+    //   • depletion_penalty: one-time, the first time either reserve runs dry.
+    //   • floor_penalty: per step while pinned at ALT_MIN (absorbing failure).
+    //   • terminal_reserve_bonus · mean(He gauge, sand gauge) at episode end.
+    // All coefficients are per-reset tunable. Physics is untouched; with the
+    // flag off the reward path is byte-identical to the baseline.
+    const resourceReward = req.use_resource_reward ? {
+        sandCostPerKg:        req.sand_cost_per_kg       != null ? +req.sand_cost_per_kg       : 2.0,
+        heliumCostPerKg:      req.helium_cost_per_kg     != null ? +req.helium_cost_per_kg     : 25.0,
+        terminalReserveBonus: req.terminal_reserve_bonus != null ? +req.terminal_reserve_bonus : 25.0,
+        depletionPenalty:     req.depletion_penalty      != null ? +req.depletion_penalty      : 25.0,
+        floorPenalty:         req.floor_penalty          != null ? +req.floor_penalty          : 0.1,
+    } : null;
 
     // Wind functions — every consumer (physics, degrader, observer, EKF) goes
     // through truthWindFn, so the modded wind stays self-consistent everywhere.
@@ -257,6 +279,9 @@ function handleReset(req) {
         targetLat:        TARGET_LAT,
         targetLon:        TARGET_LON,
         sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn },
+        resourceReward,
+        heDepleted:       false,
+        sandDepleted:     false,
     };
 
     const dist    = haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON);
@@ -309,8 +334,28 @@ function stepAction(actionIdx) {
     ep.physicsStepCount += stepsThisNav;
 
     const dist   = haversine(balloon.lat, balloon.lon, ep.targetLat, ep.targetLon);
-    const reward = computeReward(dist);
     const done   = ep.physicsStepCount >= ep.totalPhysics;
+    let reward   = computeReward(dist);
+
+    // Resource-aware terms (flag-gated; coefficients parsed in handleReset).
+    let resourceCost = 0;
+    if (ep.resourceReward) {
+        const rr = ep.resourceReward;
+        const gs = runtime.gassand;
+        resourceCost = rr.sandCostPerKg   * rel.sand_released_kg +
+                       rr.heliumCostPerKg * rel.helium_released_kg;
+        reward -= resourceCost;
+        if (!ep.heDepleted && balloon.helium_kg <= 1e-9) {
+            ep.heDepleted = true;   reward -= rr.depletionPenalty;
+        }
+        if (!ep.sandDepleted && balloon.sand_kg <= 1e-9) {
+            ep.sandDepleted = true; reward -= rr.depletionPenalty;
+        }
+        if (balloon.alt_m <= gs.ALT_MIN_M + 1) reward -= rr.floorPenalty;
+        if (done) reward += rr.terminalReserveBonus * 0.5 *
+            (balloon.helium_kg / gs.HELIUM_CAPACITY_KG +
+             balloon.sand_kg   / gs.SAND_CAPACITY_KG);
+    }
 
     if (dist < runtime.gassand.STATION_RADIUS_M) ep.inRadiusSteps++;
     ep.totalNavSteps++;
@@ -332,6 +377,7 @@ function stepAction(actionIdx) {
             helium_kg: balloon.helium_kg, sand_kg: balloon.sand_kg,
             helium_vented_kg: balloon.helium_vented_kg, sand_dropped_kg: balloon.sand_dropped_kg,
             helium_released_kg: rel.helium_released_kg, sand_released_kg: rel.sand_released_kg,
+            ...(ep.resourceReward ? { resource_cost: resourceCost } : {}),
         },
     };
 }
