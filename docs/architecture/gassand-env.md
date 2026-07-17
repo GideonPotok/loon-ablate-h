@@ -172,17 +172,26 @@ reserves are averaged per cell alongside TWR.
 
 Results (10 seeds, 72 h, `probe_gassand_transfer.json`, 2026-07-17):
 
-| policy | deterministic | realism | degradation |
-|--------|--------------|---------|-------------|
-| heuristic | 4.5% | 2.7% | +1.8pp |
-| `gassand` (det-trained) | 7.4% | 3.5% | +3.8pp |
-| `r_gassand` (realism-trained) | 7.3% | 5.5% | +1.8pp |
+| policy | deterministic | realism | degradation | sand left (realism) |
+|--------|--------------|---------|-------------|---------------------|
+| heuristic | 4.5% | 2.7% | +1.8pp | 0.0 kg |
+| `gassand` (det-trained) | 7.4% | 3.5% | +3.8pp | 0.0 kg |
+| `r_gassand` (realism-trained) | 7.3% | 5.5% | +1.8pp | 0.0 kg |
+| `res_gassand` (realism + resource reward) | 7.2% | 2.3% | +4.9pp | ~17.9 kg |
 
-The two learned policies tie on deterministic wind (7.4 vs 7.3) — realism
-training cost nothing on the clean env — while under realism the det-trained
-policy loses half its composite and R_Gassand keeps three quarters. And every
-cell of the table ends with sand ≈ 0.00 kg: the plain reward never penalises
-release, which motivates the section below.
+Among the plain-reward policies: the two learned ones tie on deterministic wind
+(7.4 vs 7.3) — realism training cost nothing on the clean env — while under
+realism the det-trained policy loses half its composite and R_Gassand keeps
+three quarters. Every plain-reward cell ends with sand ≈ 0.00 kg: the plain
+reward never penalises release, which motivates the resource-aware section
+below. Res_Gassand (trained with that reward) inverts the economy: it keeps
+~89% of its sand and ~99.9% of its helium, ties the others on deterministic
+wind (its calm 30.4% is the best single cell of any policy — frugal metering
+wins when wind is predictable), but under realism it won't spend what chasing
+shifting wind costs and its composite drops to 2.3%. At the default prices the
+conservation trade is ~0.15pp of realism composite per kg conserved; mapping
+the rest of that curve (cheaper releases → more chasing) is a coefficient
+sweep away.
 
 ## The resource-aware reward (flag-gated)
 
@@ -212,4 +221,6 @@ dominates never-spending — the degenerate policies lose on both ends.
 of R_Gassand's realism bundle — the one-change-at-a-time step after R_Gassand.
 It checkpoints best-by-eval **return** (the trained objective), logging TWR and
 reserves alongside; cross-policy comparison stays with the probe, whose metrics
-(TWR + reserves) are reward-independent.
+(TWR + reserves) are reward-independent. In the first full run (23 min local,
+seed 42) the return-optimal checkpoint came early (ep 199) and sits at the
+frugal end of the trade-off — the probe table above is its honest readout.
