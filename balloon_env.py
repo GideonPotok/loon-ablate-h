@@ -33,10 +33,16 @@ import numpy as np
 STATE_DIM  = 20
 ACTION_DIM = 17
 
+# The helium/sand gas-balloon variant has its own dims (2 resource gauges → +1
+# state dim; discrete release ladder → 11 actions instead of 17 target-alt bins).
+GASSAND_STATE_DIM  = 21
+GASSAND_ACTION_DIM = 11
+
 _SCRIPT_DIR  = Path(__file__).parent
 _SERVERS_DIR = _SCRIPT_DIR / "servers"
-_SERVER_MJS    = _SERVERS_DIR / "balloon_env_server.mjs"
-_SERVER_V2_MJS = _SERVERS_DIR / "balloon_env_server_v2.mjs"
+_SERVER_MJS         = _SERVERS_DIR / "balloon_env_server.mjs"
+_SERVER_V2_MJS      = _SERVERS_DIR / "balloon_env_server_v2.mjs"
+_SERVER_GASSAND_MJS = _SERVERS_DIR / "balloon_env_server_gassand.mjs"
 
 
 class BalloonEnv:
@@ -58,9 +64,12 @@ class BalloonEnv:
     node_bin : str, optional
         Path to the Node.js executable (default: 'node' from PATH).
     server_version : str, optional
-        Which env server to spawn: 'v1' (current shipping, default) or 'v2'
-        (in-development variant with new reward/state/shaping). Allows the
-        ongoing training to keep using v1 while v2 features are built.
+        Which env server to spawn: 'v1' (current shipping, default), 'v2'
+        (in-development variant with new reward/state/shaping), or 'gassand'
+        (zero-pressure gas-balloon model: altitude via venting finite helium →
+        sink and dropping finite sand → rise; 21-dim state, 11-action release
+        ladder). Allows the ongoing training to keep using v1 while variants
+        are built.
     """
 
     metadata = {'render_modes': []}
@@ -82,16 +91,23 @@ class BalloonEnv:
         # Example: {'use_reward_fix': True, 'terminal_twr_bonus': 50.0}
         self.flags          = dict(flags) if flags else {}
 
-        self.observation_space_shape = (STATE_DIM,)
-        self.n_actions = ACTION_DIM
-
         if server_version == 'v1':
             server_path = _SERVER_MJS
+            state_dim, n_actions = STATE_DIM, ACTION_DIM
         elif server_version == 'v2':
             server_path = _SERVER_V2_MJS
+            state_dim, n_actions = STATE_DIM, ACTION_DIM
+        elif server_version == 'gassand':
+            server_path = _SERVER_GASSAND_MJS
+            state_dim, n_actions = GASSAND_STATE_DIM, GASSAND_ACTION_DIM
         else:
-            raise ValueError(f"Unknown server_version: {server_version!r} (expected 'v1' or 'v2')")
+            raise ValueError(
+                f"Unknown server_version: {server_version!r} "
+                f"(expected 'v1', 'v2' or 'gassand')")
         self._server_path = server_path
+
+        self.observation_space_shape = (state_dim,)
+        self.n_actions = n_actions
 
         self._proc = subprocess.Popen(
             [node_bin, str(server_path)],
