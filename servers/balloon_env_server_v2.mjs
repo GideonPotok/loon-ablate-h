@@ -49,6 +49,7 @@ import { runtime } from '../js/config.js';
 import { recalculateDerived } from '../js/atmosphere.js';
 import { haversine, bearingFlat } from '../js/geo.js';
 import { getWind, getBaseWind, WIND_PRESETS } from '../js/wind.js';
+import { resolveWindSource } from '../js/wind_source.js';
 import { createState, physicsStep } from '../js/balloon.js';
 import { WindObservationStore } from '../js/wind_observer.js';
 import { WindEKF } from '../js/wind_ekf.js';
@@ -378,8 +379,17 @@ function handleReset(req) {
         return { ok: false, error: 'use_estimated_phase_features and use_time_features are mutually exclusive' };
     }
 
-    const layers = WIND_PRESETS[preset]?.layers;
-    if (!layers) return { ok: false, error: `Unknown preset: ${preset}` };
+    // ── Wind source: synthetic preset (default) or real ERA5 reanalysis ─────
+    // 'preset' keeps every existing ablation bit-identical. 'era5' moves the
+    // station to wherever the archive sample landed, so TARGET_LAT/TARGET_LON
+    // below become defaults rather than constants.
+    const windSourceName = req.wind_source || 'preset';
+    const era5Dir        = req.era5_dir || process.env.LOON_ERA5_DIR || null;
+    const era5MinShear   = (req.era5_min_shear_ms != null) ? +req.era5_min_shear_ms : 0;
+
+    if (windSourceName === 'preset' && !WIND_PRESETS[preset]?.layers) {
+        return { ok: false, error: `Unknown preset: ${preset}` };
+    }
 
     // Per-episode wind mods. Dedicated RNG stream (not the spawn RNG, whose
     // draw order must stay untouched for old ablations). All five values are
@@ -401,8 +411,27 @@ function handleReset(req) {
 
     // Wind functions — every consumer (physics, degrader, observer, EKF) goes
     // through truthWindFn, so the modded wind stays self-consistent everywhere.
-    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t, windMods);
-    const baseWindFn   = (alt_m)    => getBaseWind(layers, alt_m);
+    // ERA5 episode selection gets its own RNG stream (like windMods above), so
+    // enabling it cannot shift the spawn draws that older ablations depend on.
+    let wind;
+    try {
+        wind = resolveWindSource({
+            source:   windSourceName,
+            preset,
+            windMods,
+            era5Dir,
+            rng:      makeRng((seed + 313131) >>> 0),
+            duration_s,
+            defaultTargetLat: TARGET_LAT,
+            defaultTargetLon: TARGET_LON,
+            era5Opts: { minShear_ms: era5MinShear },
+        });
+    } catch (e) {
+        return { ok: false, error: `wind source: ${e.message}` };
+    }
+    const { truthWindFn, baseWindFn } = wind;
+    const targetLat = wind.targetLat;
+    const targetLon = wind.targetLon;
 
     // Sensing stack: ForecastDegrader → WindObserver → WindEKF
     // Domain randomization (port of js/rl_trainer.js createSensingStack drOpts):
@@ -509,9 +538,9 @@ function handleReset(req) {
     // Spawn position (mirrors rl_trainer.js)
     const rng    = makeRng(seed);
     const angle  = rng() * 2 * Math.PI;
-    const cosLat = Math.cos(TARGET_LAT * Math.PI / 180) || 1;
-    const spawnLat = TARGET_LAT + (spawnOffsetKm / 111.32) * Math.cos(angle);
-    const spawnLon = TARGET_LON + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
+    const cosLat = Math.cos(targetLat * Math.PI / 180) || 1;
+    const spawnLat = targetLat + (spawnOffsetKm / 111.32) * Math.cos(angle);
+    const spawnLon = targetLon + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
     const spawnAlt = SPAWN_ALT_MIN_M + rng() * (SPAWN_ALT_MAX_M - SPAWN_ALT_MIN_M);
 
     const balloon = createState(spawnLat, spawnLon, spawnAlt);
@@ -524,8 +553,8 @@ function handleReset(req) {
         totalPhysics:     Math.ceil(duration_s / PHYSICS_DT_S),
         inRadiusSteps:    0,
         totalNavSteps:    0,
-        targetLat:        TARGET_LAT,
-        targetLon:        TARGET_LON,
+        targetLat:        targetLat,
+        targetLon:        targetLon,
         sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn,
                             phaseFeatures, phaseDebug },
 
@@ -548,14 +577,14 @@ function handleReset(req) {
             shapingLinear,
             shapingDMax,
         },
-        prevDist: haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON),
+        prevDist: haversine(balloon.lat, balloon.lon, targetLat, targetLon),
     };
 
-    const dist    = haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON);
+    const dist    = haversine(balloon.lat, balloon.lon, targetLat, targetLon);
     let statVec = useExpandedState
-        ? extractStateV2(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON,
+        ? extractStateV2(balloon, bestWindFn, 0, targetLat, targetLon,
                          uncertaintyFn, 0, ep.totalPhysics, 0, dist /* prevDist == dist on reset */)
-        : extractState(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON, uncertaintyFn);
+        : extractState(balloon, bestWindFn, 0, targetLat, targetLon, uncertaintyFn);
     if (ep.flags.useTimeFeatures) {
         // time_s=0 on reset: sin(0)=0, cos(0)=1 for both periods — correct initial phase.
         statVec = [...statVec, 0, 1, 0, 1];
@@ -567,7 +596,13 @@ function handleReset(req) {
     return {
         ok: true,
         state: statVec,
-        info: { dist_m: dist, alt_m: balloon.alt_m, lat: balloon.lat, lon: balloon.lon, time_s: 0 },
+        info: {
+            dist_m: dist, alt_m: balloon.alt_m, lat: balloon.lat, lon: balloon.lon, time_s: 0,
+            // Which wind this episode actually ran on. For era5 this is the grid
+            // cell and start time, without which an ERA5 result is unreproducible.
+            wind: wind.meta,
+            target_lat: targetLat, target_lon: targetLon,
+        },
     };
 }
 

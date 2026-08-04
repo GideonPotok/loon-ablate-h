@@ -61,6 +61,34 @@ class BalloonEnv:
         Which env server to spawn: 'v1' (current shipping, default) or 'v2'
         (in-development variant with new reward/state/shaping). Allows the
         ongoing training to keep using v1 while v2 features are built.
+    wind_source : str, optional
+        'preset' (default) — the synthetic layered winds every ablation
+        through T was trained on. 'era5' — real reanalysis sampled from a
+        WindArchive; requires server_version='v2'.
+
+        Under 'era5' the station is NOT the hardcoded (0°N, 170°E): each
+        episode's target is wherever the archive sample landed, and the
+        balloon spawns relative to that. `last_reset_info['wind']` carries
+        the cell and start time, which an ERA5 result cannot be reproduced
+        without.
+
+        Two caveats before reading a score off this. ERA5's pressure-level
+        product has no level between 70 and 100 hPa, and the balloon band
+        (16.5–18.5 km ≈ 95–69 hPa) falls entirely in that gap, so in-band
+        shear is an interpolation between two numbers — ~10 m/s median on
+        the tropical Pacific tile, against ~16 m/s in IGRA soundings and a
+        21.9 m/s step in the `tropical` preset. And sampleEpisode pins the
+        column at the spawn cell for the whole episode, so the balloon
+        drifts but its weather does not follow. Always run the navigator
+        heuristic on the same episodes as a control.
+    era5_dir : str, optional
+        Directory of era5_wind_YYYY_MM.json files. Falls back to the
+        LOON_ERA5_DIR env var. Required when wind_source='era5'.
+    era5_min_shear_ms : float, optional
+        Rejection-sample episodes until the band has opposing u-winds of at
+        least half this on each side. 0 (default) accepts any cell, which is
+        the honest setting — filtering hands the agent a world with more
+        usable shear than the atmosphere has.
     """
 
     metadata = {'render_modes': []}
@@ -73,11 +101,35 @@ class BalloonEnv:
         node_bin: str = 'node',
         server_version: str = 'v1',
         flags: dict | None = None,
+        wind_source: str = 'preset',
+        era5_dir: str | None = None,
+        era5_min_shear_ms: float = 0.0,
     ):
         self.preset         = preset
         self.duration_s     = duration_s
         self.seed           = seed
         self.server_version = server_version
+
+        if wind_source not in ('preset', 'era5'):
+            raise ValueError(f"Unknown wind_source: {wind_source!r} (expected 'preset' or 'era5')")
+        if wind_source == 'era5' and server_version != 'v2':
+            raise ValueError(
+                f"wind_source='era5' needs server_version='v2' (got {server_version!r}); "
+                "the v1 server has no ERA5 path"
+            )
+        self.wind_source       = wind_source
+        self.era5_dir          = era5_dir or os.environ.get('LOON_ERA5_DIR')
+        self.era5_min_shear_ms = float(era5_min_shear_ms)
+        if wind_source == 'era5' and not self.era5_dir:
+            raise ValueError(
+                "wind_source='era5' needs era5_dir (or the LOON_ERA5_DIR env var) "
+                "pointing at a directory of era5_wind_YYYY_MM.json files"
+            )
+
+        # Populated on each reset(). For ERA5 this carries the grid cell and
+        # start time the episode drew, which an ERA5 result is not reproducible
+        # without. For presets it is just {'source': 'preset', 'preset': ...}.
+        self.last_reset_info: dict[str, Any] = {}
         # v2 feature flags merged into every reset request. v1 server ignores unknown keys.
         # Example: {'use_reward_fix': True, 'terminal_twr_bonus': 50.0}
         self.flags          = dict(flags) if flags else {}
@@ -142,11 +194,16 @@ class BalloonEnv:
         }
         if spawn_offset_km is not None:
             msg['spawn_offset_km'] = float(spawn_offset_km)
+        if self.wind_source != 'preset':
+            msg['wind_source']       = self.wind_source
+            msg['era5_dir']          = self.era5_dir
+            msg['era5_min_shear_ms'] = self.era5_min_shear_ms
         # Merge any v2 feature flags (server ignores unknown keys).
         for k, v in self.flags.items():
             msg[k] = v
         self._send(msg)
         resp = self._recv()
+        self.last_reset_info = resp.get('info', {})
         return np.array(resp['state'], dtype=np.float32)
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
