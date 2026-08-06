@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Local torch venv (uv venv v && VIRTUAL_ENV=v uv pip install torch numpy matplotlib)
+/v/
+.DS_Store

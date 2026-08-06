@@ -210,13 +210,35 @@ def compare_gif(a: dict, b: dict, names: tuple[str, str],
     r_lon_deg = m_to_deg_lon(STATION_RADIUS_M, st_lat)
     theta = np.linspace(0, 2 * math.pi, 200)
     frames = list(range(0, len(a['lat']), stride))
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
-    fig.suptitle(title, fontsize=12, fontweight='bold')
     x0, x1, y0, y1 = _extent([a, b], st_lat, st_lon, r_lat_deg, r_lon_deg)
 
+    # Size the canvas from the data aspect. The drift extent is typically several
+    # times wider than it is tall, and equal-aspect map panels in a fixed square
+    # figure letterbox into a thin strip surrounded by whitespace.
+    panel_w_in = 6.0
+    panel_h_in = min(6.0, max(2.0, panel_w_in * (y1 - y0) / (x1 - x0)))
+    fig = plt.figure(figsize=(13, panel_h_in + 4.0))
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.20,
+                          height_ratios=[panel_h_in, 2.1])
+
+    # The 50 km radius is invisible at drift scale — it genuinely is a dot next
+    # to 2,000 km of travel — so the shared distance track below carries the
+    # in/out question instead, with the radius as a line you can actually see.
+    ax_d = fig.add_subplot(gs[1, :])
+    ax_d.set_xlim(0, a['time_h'][-1])
+    ax_d.set_yscale('log')
+    ax_d.set_ylim(max(1.0, min(np.min(a['dist_km']), np.min(b['dist_km'])) * 0.7),
+                  max(np.max(a['dist_km']), np.max(b['dist_km'])) * 1.4)
+    ax_d.axhline(STATION_RADIUS_M / 1000, color='gray', lw=1.1, ls='--')
+    ax_d.text(a['time_h'][-1] * 0.55, STATION_RADIUS_M / 1000, '50 km radius',
+              color='gray', fontsize=8, va='bottom', ha='left')
+    ax_d.set_xlabel('Time (h)', fontsize=9)
+    ax_d.set_ylabel('Distance from station (km, log)', fontsize=9)
+
     artists = []
-    for ax, (traj, name) in zip(axes, [(a, names[0]), (b, names[1])]):
+    for col, (traj, name) in enumerate([(a, names[0]), (b, names[1])]):
+        ax = fig.add_subplot(gs[0, col])
         color = PALETTE[name]
         ax.fill(st_lon + r_lon_deg * np.cos(theta), st_lat + r_lat_deg * np.sin(theta),
                 alpha=0.14, color=color, zorder=0)
@@ -229,14 +251,18 @@ def compare_gif(a: dict, b: dict, names: tuple[str, str],
         ax.set_ylabel('Latitude (°)', fontsize=9)
         trail, = ax.plot([], [], lw=1.3, color=color, zorder=2)
         dot,   = ax.plot([], [], 'o', color='#2c3e50', ms=7, zorder=5)
-        txt = ax.text(0.02, 0.02, '', transform=ax.transAxes, fontsize=7.5,
-                      family='monospace', va='bottom',
-                      bbox=dict(facecolor='white', alpha=0.7, pad=2, edgecolor='none'))
-        artists.append((traj, trail, dot, ax, name, txt))
+        # Top-left, so it cannot sit on the station star at bottom-centre.
+        txt = ax.text(0.02, 0.97, '', transform=ax.transAxes, fontsize=7.5,
+                      family='monospace', va='top',
+                      bbox=dict(facecolor='white', alpha=0.75, pad=2, edgecolor='none'))
+        dline, = ax_d.plot([], [], lw=1.4, color=color, label=NICE[name])
+        ddot,  = ax_d.plot([], [], 'o', color=color, ms=5)
+        artists.append((traj, trail, dot, ax, name, txt, dline, ddot))
+    ax_d.legend(fontsize=8, loc='lower right')
 
     def update(fi):
         out_artists = []
-        for traj, trail, dot, ax, name, txt in artists:
+        for traj, trail, dot, ax, name, txt, dline, ddot in artists:
             trail.set_data(traj['lon'][:fi + 1], traj['lat'][:fi + 1])
             dot.set_data([traj['lon'][fi]], [traj['lat'][fi]])
             twr = float(np.mean(traj['in_radius'][:fi + 1]))
@@ -246,7 +272,9 @@ def compare_gif(a: dict, b: dict, names: tuple[str, str],
             txt.set_text(f'alt {traj["alt_m"][fi]/1000:5.2f} km\n'
                          f'He  {traj["helium_kg"][fi]:5.2f} kg\n'
                          f'sand{traj["sand_kg"][fi]:6.2f} kg')
-            out_artists += [trail, dot, txt]
+            dline.set_data(traj['time_h'][:fi + 1], traj['dist_km'][:fi + 1])
+            ddot.set_data([traj['time_h'][fi]], [traj['dist_km'][fi]])
+            out_artists += [trail, dot, txt, dline, ddot]
         return out_artists
 
     anim = FuncAnimation(fig, update, frames=frames, blit=False)
@@ -279,6 +307,9 @@ def main() -> int:
 
     picks = [('gap', showcase, f'largest {comp}-over-{subj} gap'),
              ('typical', typical, f'median {comp} episode')]
+    # Namespace by pair: the two pairs pick different episodes, so unsuffixed
+    # names would silently overwrite each other's figures.
+    slug = f'{subj}_vs_{comp}'
 
     for tag, seed, why in picks:
         print(f'\n{tag}: seed {seed} ({why})')
@@ -297,14 +328,14 @@ def main() -> int:
         # Repo-standard 6-panel replays, with the station where it actually is.
         for traj, nm in ((ta, subj), (tb, comp)):
             plot_episode(traj, 'tropical',
-                         REPO / f'replay_era5_gassand_{nm}_{tag}.png',
+                         REPO / f'replay_era5_gassand_{slug}_{nm}_{tag}.png',
                          label=f'{NICE[nm]} on ERA5 (seed {seed})',
                          station_lat=st_lat, station_lon=st_lon)
 
         compare_png(ta, tb, (subj, comp), (st_lat, st_lon),
-                    REPO / f'replay_era5_gassand_compare_{tag}.png', head)
+                    REPO / f'replay_era5_gassand_{slug}_{tag}.png', head)
         compare_gif(ta, tb, (subj, comp), (st_lat, st_lon),
-                    REPO / f'replay_era5_gassand_compare_{tag}.gif', head)
+                    REPO / f'replay_era5_gassand_{slug}_{tag}.gif', head)
 
     print('\nRENDER_DONE')
     return 0
