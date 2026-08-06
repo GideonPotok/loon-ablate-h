@@ -154,20 +154,38 @@ def load_agent(weight_path: Path, agent_kwargs: dict | None = None) -> QRAgent:
 
 
 def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
-                server_version: str = 'v1', flags: dict | None = None) -> dict:
-    """Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius."""
+                server_version: str = 'v1', flags: dict | None = None,
+                wind_source: str = 'preset', era5_dir: str | None = None,
+                heuristic: bool = False) -> dict:
+    """
+    Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius.
+
+    wind_source='era5' swaps the synthetic preset for real reanalysis; `preset`
+    is then inert, since the archive supplies the wind. The episode's grid cell
+    and start time land in traj['wind'].
+
+    heuristic=True ignores `agent` and lets the JS navigator choose. That is the
+    control an ERA5 score is uninterpretable without: a policy scoring near the
+    floor means something different depending on whether the heuristic manages
+    it on the same episodes.
+    """
     env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
-                     server_version=server_version, flags=flags)
+                     server_version=server_version, flags=flags,
+                     wind_source=wind_source, era5_dir=era5_dir)
     agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
+    reset_info = env.last_reset_info
 
     traj = {k: [] for k in ('time_s', 'lat', 'lon', 'alt_m', 'dist_m', 'action', 'reward', 'in_radius')}
     done = False
     step = 0
 
     while not done:
-        action = agent.select_action(state, greedy=True)
-        next_state, reward, done, info = env.step(action)
+        if heuristic:
+            action, next_state, reward, done, info = env.heuristic_step()
+        else:
+            action = agent.select_action(state, greedy=True)
+            next_state, reward, done, info = env.step(action)
 
         time_s  = info.get('time_s',  step * 300)
         lat     = info.get('lat',     STATION_LAT)
@@ -192,6 +210,9 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
     twr50 = sum(traj['in_radius']) / max(len(traj['in_radius']), 1)
     traj['twr50'] = twr50
     traj['n_steps'] = step
+    # Which wind this ran on. For ERA5 the cell + start time; a result without
+    # it cannot be reproduced or paired against another policy.
+    traj['wind'] = reset_info.get('wind', {})
     return traj
 
 
