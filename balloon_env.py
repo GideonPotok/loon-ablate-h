@@ -74,7 +74,7 @@ class BalloonEnv:
     wind_source : str, optional
         'preset' (default) — the synthetic layered winds every ablation
         through T was trained on. 'era5' — real reanalysis sampled from a
-        WindArchive; requires server_version='v2'.
+        WindArchive; requires server_version='v2' or 'gassand'.
 
         Under 'era5' the station is NOT the hardcoded (0°N, 170°E): each
         episode's target is wherever the archive sample landed, and the
@@ -122,10 +122,10 @@ class BalloonEnv:
 
         if wind_source not in ('preset', 'era5'):
             raise ValueError(f"Unknown wind_source: {wind_source!r} (expected 'preset' or 'era5')")
-        if wind_source == 'era5' and server_version != 'v2':
+        if wind_source == 'era5' and server_version not in ('v2', 'gassand'):
             raise ValueError(
-                f"wind_source='era5' needs server_version='v2' (got {server_version!r}); "
-                "the v1 server has no ERA5 path"
+                f"wind_source='era5' needs server_version='v2' or 'gassand' "
+                f"(got {server_version!r}); the v1 server has no ERA5 path"
             )
         self.wind_source       = wind_source
         self.era5_dir          = era5_dir or os.environ.get('LOON_ERA5_DIR')
