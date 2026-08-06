@@ -44,7 +44,8 @@ import readline from 'readline';
 import { runtime } from '../js/config.js';
 import { recalculateDerived } from '../js/atmosphere.js';
 import { haversine, bearingFlat } from '../js/geo.js';
-import { getWind, getBaseWind, WIND_PRESETS } from '../js/wind.js';
+import { WIND_PRESETS } from '../js/wind.js';
+import { resolveWindSource } from '../js/wind_source.js';
 import {
     createState, applyRelease, physicsStep, recalculateGassandDerived, findCeiling,
 } from '../js/balloon_gassand.js';
@@ -158,8 +159,17 @@ function handleReset(req) {
     const gs = runtime.gassand;
     const spawnOffsetKm = (req.spawn_offset_km != null) ? +req.spawn_offset_km : SPAWN_OFFSET_KM;
 
-    const layers = WIND_PRESETS[preset]?.layers;
-    if (!layers) return { ok: false, error: `Unknown preset: ${preset}` };
+    // ── Wind source: synthetic preset (default) or real ERA5 reanalysis ─────
+    // 'preset' keeps every existing gassand ablation bit-identical. 'era5'
+    // moves the station to wherever the archive sample landed, so
+    // TARGET_LAT/TARGET_LON below become defaults rather than constants.
+    const windSourceName = req.wind_source || 'preset';
+    const era5Dir        = req.era5_dir || process.env.LOON_ERA5_DIR || null;
+    const era5MinShear   = (req.era5_min_shear_ms != null) ? +req.era5_min_shear_ms : 0;
+
+    if (windSourceName === 'preset' && !WIND_PRESETS[preset]?.layers) {
+        return { ok: false, error: `Unknown preset: ${preset}` };
+    }
 
     // ── Realism flags (per-episode stochastic wind + sensing randomization) ──
     // Ported verbatim from the v2 server (balloon_env_server_v2.mjs) so an
@@ -211,8 +221,27 @@ function handleReset(req) {
 
     // Wind functions — every consumer (physics, degrader, observer, EKF) goes
     // through truthWindFn, so the modded wind stays self-consistent everywhere.
-    const truthWindFn  = (alt_m, t) => getWind(layers, alt_m, t, windMods);
-    const baseWindFn   = (alt_m)    => getBaseWind(layers, alt_m);
+    // ERA5 episode selection gets its own RNG stream (like windMods above), so
+    // enabling it cannot shift the spawn draws that older ablations depend on.
+    let wind;
+    try {
+        wind = resolveWindSource({
+            source:   windSourceName,
+            preset,
+            windMods,
+            era5Dir,
+            rng:      makeRng((seed + 313131) >>> 0),
+            duration_s,
+            defaultTargetLat: TARGET_LAT,
+            defaultTargetLon: TARGET_LON,
+            era5Opts: { minShear_ms: era5MinShear },
+        });
+    } catch (e) {
+        return { ok: false, error: `wind source: ${e.message}` };
+    }
+    const { truthWindFn, baseWindFn } = wind;
+    const targetLat = wind.targetLat;
+    const targetLon = wind.targetLon;
 
     // Sensing stack: ForecastDegrader → WindObserver → WindEKF (v1 stack).
     // Domain randomization (v2 port): per-episode σ-scale on the calibrated
@@ -260,9 +289,9 @@ function handleReset(req) {
     // natural launch float with a full envelope + all ballast aboard).
     const rng    = makeRng(seed);
     const angle  = rng() * 2 * Math.PI;
-    const cosLat = Math.cos(TARGET_LAT * Math.PI / 180) || 1;
-    const spawnLat = TARGET_LAT + (spawnOffsetKm / 111.32) * Math.cos(angle);
-    const spawnLon = TARGET_LON + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
+    const cosLat = Math.cos(targetLat * Math.PI / 180) || 1;
+    const spawnLat = targetLat + (spawnOffsetKm / 111.32) * Math.cos(angle);
+    const spawnLon = targetLon + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
     const ceiling  = findCeiling(gs.HELIUM_INIT_KG);
     const spawnAlt = ceiling - 300 + rng() * 400;   // ceiling-300 .. ceiling+100
 
@@ -276,16 +305,16 @@ function handleReset(req) {
         totalPhysics:     Math.ceil(duration_s / PHYSICS_DT_S),
         inRadiusSteps:    0,
         totalNavSteps:    0,
-        targetLat:        TARGET_LAT,
-        targetLon:        TARGET_LON,
+        targetLat,
+        targetLon,
         sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn },
         resourceReward,
         heDepleted:       false,
         sandDepleted:     false,
     };
 
-    const dist    = haversine(balloon.lat, balloon.lon, TARGET_LAT, TARGET_LON);
-    const statVec = extractState(balloon, bestWindFn, 0, TARGET_LAT, TARGET_LON, uncertaintyFn);
+    const dist    = haversine(balloon.lat, balloon.lon, targetLat, targetLon);
+    const statVec = extractState(balloon, bestWindFn, 0, targetLat, targetLon, uncertaintyFn);
 
     return {
         ok: true,
@@ -295,6 +324,10 @@ function handleReset(req) {
             dist_m: dist, alt_m: balloon.alt_m, lat: balloon.lat, lon: balloon.lon, time_s: 0,
             helium_kg: balloon.helium_kg, sand_kg: balloon.sand_kg,
             helium_vented_kg: 0, sand_dropped_kg: 0,
+            // Which wind this episode actually ran on. For era5 this is the grid
+            // cell and start time, without which an ERA5 result is unreproducible.
+            wind: wind.meta,
+            target_lat: targetLat, target_lon: targetLon,
         },
     };
 }

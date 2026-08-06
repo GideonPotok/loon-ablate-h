@@ -84,6 +84,19 @@ def m_to_deg_lon(m, lat=STATION_LAT):
     return m / (111_320 * math.cos(math.radians(lat)))
 
 
+def _station_of(traj: dict, station_lat=None, station_lon=None):
+    """
+    Resolve the station for plotting. Under wind_source='era5' it is the sampled
+    grid cell, which moves per episode; run_episode records it on the traj. The
+    module constants stay the fallback so existing preset callers are untouched.
+    """
+    if station_lat is None:
+        station_lat = traj.get('station_lat', STATION_LAT)
+    if station_lon is None:
+        station_lon = traj.get('station_lon', STATION_LON)
+    return station_lat, station_lon
+
+
 def load_agent(weight_path: Path):
     """Load a gassand-trained QR-DQN (only imported when --weight is given)."""
     import torch
@@ -105,13 +118,37 @@ def load_agent(weight_path: Path):
     return agent
 
 
-def run_episode(preset: str, duration_s: float, seed: int, agent=None, flags=None) -> dict:
-    """Roll out one episode; return a dict of per-decision arrays."""
+def run_episode(preset: str, duration_s: float, seed: int, agent=None, flags=None,
+                wind_source: str = 'preset', era5_dir: str | None = None,
+                era5_min_shear_ms: float = 0.0) -> dict:
+    """
+    Roll out one episode; return a dict of per-decision arrays.
+
+    agent=None runs the env's built-in wind-follower heuristic. That is the
+    control an ERA5 score is uninterpretable without: a policy near the floor
+    means one thing if the heuristic clears it on the same episodes and quite
+    another if the heuristic is down there too.
+
+    wind_source='era5' swaps the synthetic preset for real reanalysis; `preset`
+    is then inert, since the archive supplies the wind. The episode's grid cell
+    and start time land in traj['wind'], and the station moves with them — it is
+    the sampled cell, not the hardcoded (0°N, 170°E) — so traj also carries
+    station_lat/station_lon for the plotters.
+    """
     env   = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
-                       server_version='gassand', flags=flags)
+                       server_version='gassand', flags=flags,
+                       wind_source=wind_source, era5_dir=era5_dir,
+                       era5_min_shear_ms=era5_min_shear_ms)
     state = env.reset()
+    reset_info = env.last_reset_info
     if agent is not None:
         agent.reset_hidden()      # no-op unless recurrent
+
+    # Station: the sampled ERA5 cell when the archive supplies the wind, else
+    # the hardcoded constants. Everything downstream (radius circle, fallbacks)
+    # reads these rather than the module-level values.
+    st_lat = reset_info.get('target_lat', STATION_LAT)
+    st_lon = reset_info.get('target_lon', STATION_LON)
 
     keys = ('time_h', 'lat', 'lon', 'alt_m', 'dist_km', 'in_radius', 'vv',
             'action', 'rung', 'helium_kg', 'sand_kg', 'he_vented', 'sand_dropped',
@@ -127,8 +164,8 @@ def run_episode(preset: str, duration_s: float, seed: int, agent=None, flags=Non
 
         dist_m = info.get('dist_m', 0.0)
         traj['time_h'].append(info.get('time_s', step * 300) / 3600)
-        traj['lat'].append(info.get('lat', STATION_LAT))
-        traj['lon'].append(info.get('lon', STATION_LON))
+        traj['lat'].append(info.get('lat', st_lat))
+        traj['lon'].append(info.get('lon', st_lon))
         traj['alt_m'].append(info.get('alt_m', CEILING_M))
         traj['dist_km'].append(dist_m / 1000)
         traj['in_radius'].append(dist_m < STATION_RADIUS_M)
@@ -153,12 +190,19 @@ def run_episode(preset: str, duration_s: float, seed: int, agent=None, flags=Non
     traj['sand_left']     = float(traj['sand_kg'][-1])    if step else SAND_CAP_KG
     traj['he_used']       = float(traj['he_vented'][-1])  if step else 0.0
     traj['sand_used']     = float(traj['sand_dropped'][-1]) if step else 0.0
+    # Which wind this episode ran on, and where the station was — an ERA5 result
+    # is not reproducible without the cell and start time.
+    traj['wind']         = reset_info.get('wind', {'source': wind_source, 'preset': preset})
+    traj['station_lat']  = st_lat
+    traj['station_lon']  = st_lon
     return traj
 
 
 # ── Static PNG ─────────────────────────────────────────────────────────────────
 
-def plot_episode(traj: dict, preset: str, out_path: Path, label: str):
+def plot_episode(traj: dict, preset: str, out_path: Path, label: str,
+                 station_lat: float | None = None, station_lon: float | None = None):
+    st_lat, st_lon = _station_of(traj, station_lat, station_lon)
     color = PRESET_COLORS.get(preset, '#3498db')
     lats, lons = traj['lat'], traj['lon']
     alts       = traj['alt_m']
@@ -179,15 +223,15 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str):
     gs = fig.add_gridspec(2, 3, hspace=0.40, wspace=0.34)
 
     # ── Panels 1 & 4: trajectory maps (zoom out / zoom in) ────────────────────
-    r_lat, r_lon = m_to_deg_lat(STATION_RADIUS_M), m_to_deg_lon(STATION_RADIUS_M)
+    r_lat, r_lon = m_to_deg_lat(STATION_RADIUS_M), m_to_deg_lon(STATION_RADIUS_M, st_lat)
     theta = np.linspace(0, 2 * math.pi, 200)
-    circ_lat = STATION_LAT + r_lat * np.sin(theta)
-    circ_lon = STATION_LON + r_lon * np.cos(theta)
+    circ_lat = st_lat + r_lat * np.sin(theta)
+    circ_lon = st_lon + r_lon * np.cos(theta)
 
     def _draw_map(ax, xlim, ylim, title):
         ax.fill(circ_lon, circ_lat, alpha=0.12, color=color, zorder=0)
         ax.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', zorder=1)
-        ax.plot(STATION_LON, STATION_LAT, '*', color=color, ms=12, zorder=3)
+        ax.plot(st_lon, st_lat, '*', color=color, ms=12, zorder=3)
         points = np.array([lons, lats]).T.reshape(-1, 1, 2)
         segs   = np.concatenate([points[:-1], points[1:]], axis=1)
         seg_colors = ['#2ecc71' if i else '#e74c3c' for i in in_r[1:]]
@@ -200,18 +244,18 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str):
         ax.set_ylabel('Latitude (°)', fontsize=9)
         ax.set_title(title, fontsize=9)
 
-    lon_dev = max(np.abs(lons - STATION_LON).max(), r_lon * 1.2) * 1.12
-    lat_dev = max(np.abs(lats - STATION_LAT).max(), r_lat * 1.2) * 1.12
+    lon_dev = max(np.abs(lons - st_lon).max(), r_lon * 1.2) * 1.12
+    lat_dev = max(np.abs(lats - st_lat).max(), r_lat * 1.2) * 1.12
     ax_map_out = fig.add_subplot(gs[0, 0])
-    _draw_map(ax_map_out, (STATION_LON - lon_dev, STATION_LON + lon_dev),
-              (STATION_LAT - lat_dev, STATION_LAT + lat_dev),
+    _draw_map(ax_map_out, (st_lon - lon_dev, st_lon + lon_dev),
+              (st_lat - lat_dev, st_lat + lat_dev),
               'Full trajectory (zoomed out)\n(green = in radius, red = out)')
     ax_map_out.legend(fontsize=7, loc='upper right')
 
     zi = 1.7
     ax_map_in = fig.add_subplot(gs[1, 0])
-    _draw_map(ax_map_in, (STATION_LON - r_lon * zi, STATION_LON + r_lon * zi),
-              (STATION_LAT - r_lat * zi, STATION_LAT + r_lat * zi),
+    _draw_map(ax_map_in, (st_lon - r_lon * zi, st_lon + r_lon * zi),
+              (st_lat - r_lat * zi, st_lat + r_lat * zi),
               'Near station (zoomed in)')
 
     # ── Panel 2: altitude over time ───────────────────────────────────────────
@@ -281,9 +325,11 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str):
 
 # ── Animated GIF ───────────────────────────────────────────────────────────────
 
-def make_gif(traj: dict, preset: str, out_path: Path, label: str, stride=4, fps=12):
+def make_gif(traj: dict, preset: str, out_path: Path, label: str, stride=4, fps=12,
+             station_lat: float | None = None, station_lon: float | None = None):
     from matplotlib.animation import FuncAnimation, PillowWriter
 
+    st_lat, st_lon = _station_of(traj, station_lat, station_lon)
     color = PRESET_COLORS.get(preset, '#3498db')
     lats, lons = traj['lat'], traj['lon']
     alts       = traj['alt_m']
@@ -295,12 +341,12 @@ def make_gif(traj: dict, preset: str, out_path: Path, label: str, stride=4, fps=
     twr50      = traj['twr50']
     n          = len(times)
 
-    r_lat, r_lon = m_to_deg_lat(STATION_RADIUS_M), m_to_deg_lon(STATION_RADIUS_M)
+    r_lat, r_lon = m_to_deg_lat(STATION_RADIUS_M), m_to_deg_lon(STATION_RADIUS_M, st_lat)
     theta = np.linspace(0, 2 * math.pi, 300)
-    circ_lat = STATION_LAT + r_lat * np.sin(theta)
-    circ_lon = STATION_LON + r_lon * np.cos(theta)
-    lon_dev = max(abs(lons - STATION_LON).max(), r_lon * 1.5) + r_lon * 0.4
-    lat_dev = max(abs(lats - STATION_LAT).max(), r_lat * 1.5) + r_lat * 0.4
+    circ_lat = st_lat + r_lat * np.sin(theta)
+    circ_lon = st_lon + r_lon * np.cos(theta)
+    lon_dev = max(abs(lons - st_lon).max(), r_lon * 1.5) + r_lon * 0.4
+    lat_dev = max(abs(lats - st_lat).max(), r_lat * 1.5) + r_lat * 0.4
 
     fig = plt.figure(figsize=(16, 8), facecolor='#12121f')
     fig.suptitle(f'{label} — {preset}  |  TWR50 = {twr50*100:.1f}%',
@@ -323,12 +369,12 @@ def make_gif(traj: dict, preset: str, out_path: Path, label: str, stride=4, fps=
     ax_map.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', alpha=0.5, zorder=1)
     for mult in (3, 5, 10):
         rm = STATION_RADIUS_M * mult
-        ax_map.plot(STATION_LON + m_to_deg_lon(rm) * np.cos(theta),
-                    STATION_LAT + m_to_deg_lat(rm) * np.sin(theta),
+        ax_map.plot(st_lon + m_to_deg_lon(rm, st_lat) * np.cos(theta),
+                    st_lat + m_to_deg_lat(rm) * np.sin(theta),
                     color='#1e1e33', lw=0.5, ls=':', zorder=0)
-    ax_map.plot(STATION_LON, STATION_LAT, '*', color='white', ms=9, zorder=4, alpha=0.9)
-    ax_map.set_xlim(STATION_LON - lon_dev, STATION_LON + lon_dev)
-    ax_map.set_ylim(STATION_LAT - lat_dev, STATION_LAT + lat_dev)
+    ax_map.plot(st_lon, st_lat, '*', color='white', ms=9, zorder=4, alpha=0.9)
+    ax_map.set_xlim(st_lon - lon_dev, st_lon + lon_dev)
+    ax_map.set_ylim(st_lat - lat_dev, st_lat + lat_dev)
     ax_map.set_aspect('equal', adjustable='box')
     ax_map.set_xlabel('Longitude (°)', color='#888899', fontsize=8)
     ax_map.set_ylabel('Latitude (°)', color='#888899', fontsize=8)
