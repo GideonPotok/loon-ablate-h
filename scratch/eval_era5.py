@@ -131,7 +131,7 @@ def main() -> int:
          'start': w.get('startISO')} for s, w in zip(seeds, winds)
     ]
 
-    print('\npaired deltas (same 30 episodes):')
+    print(f'\npaired deltas (same {args.episodes} episodes):')
     comparisons = [('R', 'heuristic'), ('R', 'float'), ('S', 'R'), ('heuristic', 'float')]
     results['paired'] = {}
     for a, b in comparisons:
