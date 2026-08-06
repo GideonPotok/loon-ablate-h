@@ -1,0 +1,134 @@
+% Gassand physics glossary — LaTeX version of gassand-physics-glossary.md.
+% Build: latexmk -pdf gassand-physics-glossary.tex   (from this directory)
+\documentclass[10pt]{article}
+
+\usepackage[letterpaper, margin=1.8cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{parskip}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Gassand physics glossary}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+\vspace{-3.5em}
+
+Every mathematical symbol from the AP-Physics-B/C treatment of the
+helium/sand zero-pressure balloon, with the value it takes in this sim
+(sources: \code{js/config.js} \code{DEFAULT\_GASSAND},
+\code{js/balloon\_gassand.js}, and the measured $49\,\mathrm{m/kg}$
+settling probe).
+
+\begingroup
+\small
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\begin{longtable}{@{} >{$}l<{$} p{5.6cm} l p{6.9cm} @{}}
+\toprule
+\text{Symbol} & Name / meaning & Units & Value in this sim \\
+\midrule
+\endfirsthead
+\toprule
+\text{Symbol} & Name / meaning & Units & Value in this sim \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+W & weight of the whole system, $mg$ & $\mathrm{N}$ &
+  $\approx 139 \times 9.81 \approx 1366$ at launch \\
+F_B & buoyant force (Archimedes) & $\mathrm{N}$ &
+  equals $W$ at the float; code computes net
+  \code{(displacedAirMass - totalMass)$\,\cdot\,$G} \\
+F_D & drag force, $-\tfrac{1}{2} C_d \rho A |v| v$ & $\mathrm{N}$ &
+  sign opposes motion (\code{balloon\_gassand.js:153}) \\
+F_{\text{net}} & net vertical force fed into $m\,dv/dt$ & $\mathrm{N}$ &
+  buoyancy $+$ drag \\
+\Delta F & buoyancy imbalance right after a release & $\mathrm{N}$ &
+  $\approx g\,\Delta m_{\text{sand}}$ for sand;
+  $\approx 6.236\,g\,\Delta m_{\text{He}}$ for helium
+  (release ladders paired by this factor) \\
+m,\ m_{\text{total}} & total mass: structure $+$ sand $+$ helium & $\mathrm{kg}$ &
+  $100 + 20 + 19.24 \approx 139.24$ at launch
+  (\code{DRY\_MASS\_KG} $+$ reserves) \\
+m_{\text{He}} & helium mass aboard (only depletes) & $\mathrm{kg}$ &
+  $19.24165$ at launch (\code{HELIUM\_INIT\_KG}) \\
+\Delta m & mass shed by one release & $\mathrm{kg}$ &
+  sand actions $0.005$--$1.0$; helium actions $0.0008$--$0.1604$ \\
+g\ \text{(code \code{G})} & gravitational acceleration & $\mathrm{m/s^2}$ &
+  $9.81$ \\
+v\ \text{(code \code{vv\_m\_s})} & vertical velocity, $+$ up & $\mathrm{m/s}$ &
+  clamped to $\pm 2.5$ (\code{MAX\_VV\_M\_S}) \\
+v_{\text{terminal}} & drag-limited vertical speed,
+  $\sqrt{2\,\Delta F / (\rho\, C_d A)}$ & $\mathrm{m/s}$ &
+  $0.11$--$1.56$ across the action ladder; $\propto \sqrt{\Delta m}$,
+  so a $200\times$ mass range gives only ${\sim}14\times$ speed \\
+M_{\text{air}} & molar mass of air & $\mathrm{kg/mol}$ &
+  $0.0289647$ (\code{M\_AIR\_KG\_MOL}) \\
+M_{\text{He}} & molar mass of helium & $\mathrm{kg/mol}$ &
+  $0.0040026$ (\code{M\_HE\_KG\_MOL}) \\
+M_{\text{air}}/M_{\text{He}} & air displaced per kg of helium (bubble regime) & --- &
+  $7.237$ (\code{AIR\_PER\_HELIUM}); net lift per kg He $= 6.236$ \\
+R & universal gas constant, in
+  $V = m_{\text{He}} R T / (M_{\text{He}} P)$ & $\mathrm{J/(mol\,K)}$ &
+  $8.314$ \\
+T & ambient temperature (ideal-gas law contexts) & $\mathrm{K}$ &
+  from \code{atmosphereAt(alt)} \\
+P & ambient pressure & $\mathrm{Pa}$ &
+  from \code{atmosphereAt(alt)} \\
+\rho,\ \rho_{\text{air}}(h) & ambient air density at altitude $h$ & $\mathrm{kg/m^3}$ &
+  $\approx 0.139$ at the $17.1\,\mathrm{km}$ float
+  ($= m_{\text{total}} / V_{\text{env}}$) \\
+\rho_0 & sea-level reference density & $\mathrm{kg/m^3}$ &
+  $\approx 1.225$ \\
+H & density scale height in $\rho(h) = \rho_0\, e^{-h/H}$ & $\mathrm{m}$ &
+  $\approx 6800$ near these altitudes (fit to the sim atmosphere, not a
+  config constant) \\
+V,\ V_{\text{displaced}} & volume of air displaced by the gas bubble & $\mathrm{m^3}$ &
+  $\min(\text{bubble}, \text{envelope})$ --- the two-regime \code{min} in
+  \code{displacedAirMass} \\
+V_{\text{env}} & envelope volume (fixed) & $\mathrm{m^3}$ &
+  $1000$ (\code{V\_ENVELOPE\_M3}) \\
+r & balloon radius (sphere of volume $V_{\text{env}}$) & $\mathrm{m}$ &
+  $\sqrt[3]{3 V_{\text{env}} / 4\pi} \approx 6.20$ (\code{balloonRadius\_m}) \\
+A & cross-sectional area for drag, $\pi r^2$ & $\mathrm{m^2}$ &
+  $\approx 121$ \\
+C_d & drag coefficient & --- &
+  $0.47$, sphere (\code{DRAG\_COEFFICIENT}) \\
+h & altitude & $\mathrm{m}$ &
+  sim band $15{,}000$--$22{,}000$ (\code{ALT\_MIN\_M}/\code{ALT\_MAX\_M}) \\
+h_{\text{park}} & park (float) altitude solving
+  $\rho(h)\, V_{\text{env}} = m_{\text{total}}$ & $\mathrm{m}$ &
+  $17{,}093$ at launch config (\code{altBandLow\_m}); $18{,}076$ with all
+  sand dropped \\
+\Delta h & shift in park altitude per mass shed,
+  $\approx H\, (\Delta m / m)$ & $\mathrm{m}$ &
+  $\approx 49$ per kg of sand (measured); $983$ for the whole
+  $20\,\mathrm{kg}$ bag \\
+k & effective spring constant of the float, $mg/H$ & $\mathrm{N/m}$ &
+  $139 \cdot 9.81 / 6800 \approx 0.20$ --- matches the code comment
+  ``restoring force ${\sim}0.2$ N/m'' \\
+\omega & natural angular frequency of the float, $\sqrt{g/H}$ & $\mathrm{rad/s}$ &
+  $\approx 0.038$ \\
+T_{\text{osc}} & vertical oscillation period, $2\pi/\omega$
+  (distinct from temperature $T$) & $\mathrm{s}$ &
+  $\approx 166$ (${\sim}2.8$ min) --- why the integrator sub-steps at
+  $5\,\mathrm{s}$ (\code{VERT\_SUBSTEP\_S}, stability needs
+  $dt \cdot \omega < 2$) \\
+\end{longtable}
+\endgroup
+
+Two symbols to keep un-confused: $T$ is temperature in the ideal-gas law
+but a period in the oscillation analysis (written $T_{\text{osc}}$ here),
+and $\rho$ always means \emph{ambient air} density --- the helium's own
+density never appears because the bubble-regime buoyancy
+$m_{\text{He}}\,(M_{\text{air}}/M_{\text{He}})\,g$ already folds it in.
+
+\end{document}
