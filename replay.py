@@ -154,20 +154,38 @@ def load_agent(weight_path: Path, agent_kwargs: dict | None = None) -> QRAgent:
 
 
 def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
-                server_version: str = 'v1', flags: dict | None = None) -> dict:
-    """Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius."""
+                server_version: str = 'v1', flags: dict | None = None,
+                wind_source: str = 'preset', era5_dir: str | None = None,
+                heuristic: bool = False) -> dict:
+    """
+    Return a dict of lists: time_s, lat, lon, alt_m, dist_m, action, reward, in_radius.
+
+    wind_source='era5' swaps the synthetic preset for real reanalysis; `preset`
+    is then inert, since the archive supplies the wind. The episode's grid cell
+    and start time land in traj['wind'].
+
+    heuristic=True ignores `agent` and lets the JS navigator choose. That is the
+    control an ERA5 score is uninterpretable without: a policy scoring near the
+    floor means something different depending on whether the heuristic manages
+    it on the same episodes.
+    """
     env = BalloonEnv(preset=preset, duration_s=duration_s, seed=seed,
-                     server_version=server_version, flags=flags)
+                     server_version=server_version, flags=flags,
+                     wind_source=wind_source, era5_dir=era5_dir)
     agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
+    reset_info = env.last_reset_info
 
     traj = {k: [] for k in ('time_s', 'lat', 'lon', 'alt_m', 'dist_m', 'action', 'reward', 'in_radius')}
     done = False
     step = 0
 
     while not done:
-        action = agent.select_action(state, greedy=True)
-        next_state, reward, done, info = env.step(action)
+        if heuristic:
+            action, next_state, reward, done, info = env.heuristic_step()
+        else:
+            action = agent.select_action(state, greedy=True)
+            next_state, reward, done, info = env.step(action)
 
         time_s  = info.get('time_s',  step * 300)
         lat     = info.get('lat',     STATION_LAT)
@@ -192,10 +210,14 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
     twr50 = sum(traj['in_radius']) / max(len(traj['in_radius']), 1)
     traj['twr50'] = twr50
     traj['n_steps'] = step
+    # Which wind this ran on. For ERA5 the cell + start time; a result without
+    # it cannot be reproduced or paired against another policy.
+    traj['wind'] = reset_info.get('wind', {})
     return traj
 
 
-def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation H (w00)'):
+def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation H (w00)',
+                 station_lat: float | None = None, station_lon: float | None = None):
     color = PRESET_COLORS.get(preset, '#3498db')
     lats  = np.array(traj['lat'])
     lons  = np.array(traj['lon'])
@@ -215,16 +237,21 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
     gs = fig.add_gridspec(2, 3, hspace=0.38, wspace=0.32)
 
     # ── Panel 1: lat/lon map, zoomed out (full trajectory) + zoomed in (station) ─
+    # Under wind_source='era5' the station is the sampled grid cell, not the
+    # hardcoded (0, 170) — drawing the marker at the constant would put the
+    # radius circle thousands of km from the balloon.
+    st_lat = STATION_LAT if station_lat is None else station_lat
+    st_lon = STATION_LON if station_lon is None else station_lon
     r_lat = m_to_deg_lat(STATION_RADIUS_M)
-    r_lon = m_to_deg_lon(STATION_RADIUS_M)
+    r_lon = m_to_deg_lon(STATION_RADIUS_M, st_lat)
     theta = np.linspace(0, 2 * math.pi, 200)
-    circ_lat = STATION_LAT + r_lat * np.sin(theta)
-    circ_lon = STATION_LON + r_lon * np.cos(theta)
+    circ_lat = st_lat + r_lat * np.sin(theta)
+    circ_lon = st_lon + r_lon * np.cos(theta)
 
     def _draw_map(ax, xlim, ylim, title):
         ax.fill(circ_lon, circ_lat, alpha=0.12, color=color, zorder=0)
         ax.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', zorder=1)
-        ax.plot(STATION_LON, STATION_LAT, '*', color=color, ms=12, zorder=3)
+        ax.plot(st_lon, st_lat, '*', color=color, ms=12, zorder=3)
 
         points = np.array([lons, lats]).T.reshape(-1, 1, 2)
         segs   = np.concatenate([points[:-1], points[1:]], axis=1)
@@ -242,12 +269,12 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
         ax.set_title(title, fontsize=9)
 
     # zoomed-out: whole trajectory + 12% padding
-    lon_dev_out = max(np.abs(lons - STATION_LON).max(), r_lon * 1.2) * 1.12
-    lat_dev_out = max(np.abs(lats - STATION_LAT).max(), r_lat * 1.2) * 1.12
+    lon_dev_out = max(np.abs(lons - st_lon).max(), r_lon * 1.2) * 1.12
+    lat_dev_out = max(np.abs(lats - st_lat).max(), r_lat * 1.2) * 1.12
     ax_map_out = fig.add_subplot(gs[0, 0])
     _draw_map(ax_map_out,
-              (STATION_LON - lon_dev_out, STATION_LON + lon_dev_out),
-              (STATION_LAT - lat_dev_out, STATION_LAT + lat_dev_out),
+              (st_lon - lon_dev_out, st_lon + lon_dev_out),
+              (st_lat - lat_dev_out, st_lat + lat_dev_out),
               'Full trajectory (zoomed out)\n(green = in radius, red = out)')
     ax_map_out.legend(fontsize=7, loc='upper right')
 
@@ -257,8 +284,8 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
     lat_dev_in = r_lat * ZOOM_IN_MULT
     ax_map_in = fig.add_subplot(gs[1, 0])
     _draw_map(ax_map_in,
-              (STATION_LON - lon_dev_in, STATION_LON + lon_dev_in),
-              (STATION_LAT - lat_dev_in, STATION_LAT + lat_dev_in),
+              (st_lon - lon_dev_in, st_lon + lon_dev_in),
+              (st_lat - lat_dev_in, st_lat + lat_dev_in),
               'Near station (zoomed in)\n(green = in radius, red = out)')
 
     # ── Panel 2: altitude vs time ─────────────────────────────────────────────
