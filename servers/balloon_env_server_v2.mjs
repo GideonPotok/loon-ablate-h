@@ -379,6 +379,12 @@ function handleReset(req) {
         return { ok: false, error: 'use_estimated_phase_features and use_time_features are mutually exclusive' };
     }
 
+    // ── Navigation mode (Ablation U): spawn near station A, target B at
+    //    navigation_distance_km in a per-episode random direction. ────────────
+    const useNavigation        = !!req.use_navigation;
+    const navigationDistanceKm = (req.navigation_distance_km != null) ? +req.navigation_distance_km : 100;
+    const arrivalBonus         = (req.arrival_bonus != null) ? +req.arrival_bonus : 0;
+
     // ── Wind source: synthetic preset (default) or real ERA5 reanalysis ─────
     // 'preset' keeps every existing ablation bit-identical. 'era5' moves the
     // station to wherever the archive sample landed, so TARGET_LAT/TARGET_LON
@@ -539,8 +545,27 @@ function handleReset(req) {
     const rng    = makeRng(seed);
     const angle  = rng() * 2 * Math.PI;
     const cosLat = Math.cos(targetLat * Math.PI / 180) || 1;
-    const spawnLat = targetLat + (spawnOffsetKm / 111.32) * Math.cos(angle);
-    const spawnLon = targetLon + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
+
+    let finalTargetLat = targetLat;
+    let finalTargetLon = targetLon;
+
+    if (useNavigation) {
+        // Navigation mode: target B is navigation_distance_km from the station
+        // in a per-episode random direction. Dedicated RNG stream so enabling
+        // navigation doesn't shift existing spawn/wind draws.
+        const navRng    = makeRng((seed + 191919) >>> 0);
+        const navAngle  = navRng() * 2 * Math.PI;
+        finalTargetLat = targetLat + (navigationDistanceKm / 111.32) * Math.cos(navAngle);
+        finalTargetLon = targetLon + (navigationDistanceKm / (111.32 * cosLat)) * Math.sin(navAngle);
+    }
+
+    // In navigation mode: spawn near the station (point A) with spawn_offset_km
+    // jitter, NOT near the target (point B). In station-keeping mode: spawn near
+    // the target as before (targetLat/targetLon == station).
+    const spawnOriginLat = useNavigation ? targetLat : finalTargetLat;
+    const spawnOriginLon = useNavigation ? targetLon : finalTargetLon;
+    const spawnLat = spawnOriginLat + (spawnOffsetKm / 111.32) * Math.cos(angle);
+    const spawnLon = spawnOriginLon + (spawnOffsetKm / (111.32 * cosLat)) * Math.sin(angle);
     const spawnAlt = SPAWN_ALT_MIN_M + rng() * (SPAWN_ALT_MAX_M - SPAWN_ALT_MIN_M);
 
     const balloon = createState(spawnLat, spawnLon, spawnAlt);
@@ -553,8 +578,9 @@ function handleReset(req) {
         totalPhysics:     Math.ceil(duration_s / PHYSICS_DT_S),
         inRadiusSteps:    0,
         totalNavSteps:    0,
-        targetLat:        targetLat,
-        targetLon:        targetLon,
+        targetLat:        finalTargetLat,
+        targetLon:        finalTargetLon,
+        arrivalStep:      null,        // first nav step inside target radius (navigation mode)
         sensing:          { bestWindFn, uncertaintyFn, stepSensing, truthWindFn,
                             phaseFeatures, phaseDebug },
 
@@ -576,15 +602,16 @@ function handleReset(req) {
             terminalTwrBonus,
             shapingLinear,
             shapingDMax,
+            arrivalBonus,
         },
-        prevDist: haversine(balloon.lat, balloon.lon, targetLat, targetLon),
+        prevDist: haversine(balloon.lat, balloon.lon, finalTargetLat, finalTargetLon),
     };
 
-    const dist    = haversine(balloon.lat, balloon.lon, targetLat, targetLon);
+    const dist    = haversine(balloon.lat, balloon.lon, finalTargetLat, finalTargetLon);
     let statVec = useExpandedState
-        ? extractStateV2(balloon, bestWindFn, 0, targetLat, targetLon,
+        ? extractStateV2(balloon, bestWindFn, 0, finalTargetLat, finalTargetLon,
                          uncertaintyFn, 0, ep.totalPhysics, 0, dist /* prevDist == dist on reset */)
-        : extractState(balloon, bestWindFn, 0, targetLat, targetLon, uncertaintyFn);
+        : extractState(balloon, bestWindFn, 0, finalTargetLat, finalTargetLon, uncertaintyFn);
     if (ep.flags.useTimeFeatures) {
         // time_s=0 on reset: sin(0)=0, cos(0)=1 for both periods — correct initial phase.
         statVec = [...statVec, 0, 1, 0, 1];
@@ -601,7 +628,7 @@ function handleReset(req) {
             // Which wind this episode actually ran on. For era5 this is the grid
             // cell and start time, without which an ERA5 result is unreproducible.
             wind: wind.meta,
-            target_lat: targetLat, target_lon: targetLon,
+            target_lat: finalTargetLat, target_lon: finalTargetLon,
         },
     };
 }
@@ -640,9 +667,17 @@ function handleStep(req) {
     let   reward = computeReward(dist, ep.flags);
     const done   = ep.physicsStepCount >= ep.totalPhysics;
 
-    if (dist < runtime.platform.STATION_RADIUS_M) ep.inRadiusSteps++;
+    const R_nav = runtime.platform.STATION_RADIUS_M;
+    if (dist < R_nav) ep.inRadiusSteps++;
     ep.totalNavSteps++;
     const twr50 = ep.totalNavSteps > 0 ? ep.inRadiusSteps / ep.totalNavSteps : 0;
+
+    // Arrival bonus — one-time reward on first entry into target radius.
+    // Non-potential-based; for navigation mode this incentivises reaching B.
+    if (ep.arrivalStep === null && dist < R_nav) {
+        ep.arrivalStep = ep.totalNavSteps;
+        reward += ep.flags.arrivalBonus;
+    }
 
     // Terminal TWR bonus (Phase v2 reward fix, step 3).
     // Added exactly once at episode end so the agent's return correlates with the eval metric.
@@ -709,6 +744,7 @@ function handleStep(req) {
         info: {
             dist_m: dist, twr50, time_s, alt_m: balloon.alt_m,
             lat: balloon.lat, lon: balloon.lon,
+            ...(ep.arrivalStep != null ? { arrival_step: ep.arrivalStep } : {}),
             ...(ep.flags.useEstimatedPhaseFeatures
                 ? { phase_debug: sensing.phaseDebug() } : {}),
         },
