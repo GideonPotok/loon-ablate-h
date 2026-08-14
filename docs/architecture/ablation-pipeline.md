@@ -33,23 +33,22 @@ delivery actually works today, not an aspirational rewrite of it.
 - GPU training (repo installs the CPU-only `torch` wheel in CI).
 - A hosted metrics dashboard (not in place today — see [ADR-0001](../adr/0001-experiment-tracking-tooling.md)).
 
-### Not Part of This Pipeline (despite appearances)
-- **`task_scheduler.py`** (repo root) — its name suggests it might orchestrate worker/ablation scheduling. It doesn't: it's a generic, self-contained priority-queue exercise (`Task` dataclass, heap-based `SchedulerService`) with no reference to balloons, weights, or CI anywhere in it. Don't look here for orchestration logic — that's `ablate_<letter>_train.py` + `run_worker.py` + `train.yml`.
+### Not Part of This Pipeline (despite appearances) 
 - **`scratch/`** — contains only agent-harness session boilerplate, not experiment scratch data.
 
 ## Architecture Overview
 
 ```
  ideation              implementation            CI launch                 collection              visualization
-┌────────────────┐   ┌─────────────────────┐   ┌───────────────────┐   ┌───────────────────┐   ┌──────────────────────┐
+┌────────────────┐   ┌─────────────────────┐   ┌────────────────────┐   ┌────────────────────┐   ┌──────────────────────┐
 │ docstring in a │   │ ablate_<x>_train.py │   │ train.yml          │   │ collect job        │   │ replay.py (PNG)      │
-│ new            │──▶│  + hand-edit         │──▶│  workflow_dispatch │──▶│  download-artifact │──▶│ make_gif.py (GIF)    │
-│ ablate_<x>_    │   │    run_worker.py     │   │  matrix: 10 workers│   │  collect.py picks  │   │  against the winning │
-│ train.py       │   │    collect.py        │   │  each ≤6h          │   │  max(best_score)   │   │  weights/dqn_ablate_ │
-│ (hypothesis +  │   │  to the new letter   │   │                    │   │  uploads            │   │  <x>.pt              │
-│ prior-ablation │   │                      │   │                    │   │  final-ablate-<x>  │   │                      │
-│ diagnosis)     │   │                      │   │                    │   │                    │   │                      │
-└────────────────┘   └─────────────────────┘   └───────────────────┘   └───────────────────┘   └──────────────────────┘
+│ new            │──▶│  + hand-edit        │──▶│  workflow_dispatch │──▶│  download-artifact │──▶│ make_gif.py (GIF)    │
+│ ablate_<x>_    │   │    run_worker.py    │   │  matrix: 10 workers│   │  collect.py picks  │   │  against the winning │
+│ train.py       │   │    collect.py       │   │  each ≤6h          │   │  max(best_score)   │   │  weights/dqn_ablate_ │
+│ (hypothesis +  │   │  to the new letter  │   │                    │   │  uploads           │   │  <x>.pt              │
+│ prior-ablation │   │                     │   │                    │   │  final-ablate-<x>  │   │                      │
+│ diagnosis)     │   │                     │   │                    │   │                    │   │                      │
+└────────────────┘   └─────────────────────┘   └────────────────────┘   └────────────────────┘   └──────────────────────┘
                               │                          │                       │
                               ▼                          ▼                       ▼
                        qr_agent.py (shared)      servers/balloon_env_    weights/  (local, mostly
