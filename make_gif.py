@@ -110,6 +110,27 @@ ENV_FLAGS = {
         'wind_param_jitter':  True,
         'domain_rand':        True,
     },
+    'u': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  False,            # oracle stays removed
+        'use_estimated_phase_features': True,   # +4 estimator features — 24-dim (from S)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      150_000.0,        # tau = 150 km (nav gradient, was 500)
+        # Realism bundle — same testbed as R/S/T
+        'wind_phase_jitter':  True,
+        'wind_episode_noise': True,
+        'wind_param_jitter':  True,
+        'domain_rand':        True,
+        # Navigation mode — spawn near station A, target B 100 km away
+        'use_navigation':          True,
+        'navigation_distance_km':  100.0,
+        'arrival_bonus':           25.0,
+    },
 }
 
 LABELS = {
@@ -120,6 +141,7 @@ LABELS = {
     'n':  'Ablation N (gamma 0.99 + curriculum rebalance)',
     'q':  'Ablation Q (option-critic, per-step cadence)',
     'r':  'Ablation R (realism floor, no oracle features)',
+    'u':  'Ablation U (A-to-B navigation, 100 km)',
 }
 # Architecture overrides not recoverable from the checkpoint's saved config
 # (QRAgent.state_dict() only persists the feedforward-relevant fields).
@@ -164,6 +186,7 @@ def run_episode(agent, preset, duration_s, seed, flags):
                      server_version='v2', flags=flags)
     agent.reset_hidden()      # no-op unless agent.config.use_recurrent
     state = env.reset()
+    reset_info = env.last_reset_info
     traj = {k: [] for k in ('time_h', 'lat', 'lon', 'alt_m', 'dist_km', 'in_radius',
                              'reward', 'v_mean', 'v_cvar', 'option')}
     done = False
@@ -188,7 +211,12 @@ def run_episode(agent, preset, duration_s, seed, flags):
     traj['twr50'] = sum(traj['in_radius']) / max(len(traj['in_radius']), 1)
     traj['cvar_alpha'] = agent.config.cvar_alpha
     traj['use_options'] = agent.config.use_options
-    return {k: (np.array(v) if k not in ('twr50', 'cvar_alpha', 'use_options') else v)
+    scalar_keys = ('twr50', 'cvar_alpha', 'use_options', 'target_lat', 'target_lon')
+    # Navigation mode (U): dist_km / in_radius above are relative to this
+    # target, not the station. None on station-keeping resets.
+    traj['target_lat'] = reset_info.get('target_lat')
+    traj['target_lon'] = reset_info.get('target_lon')
+    return {k: (np.array(v) if k not in scalar_keys else v)
             for k, v in traj.items()}
 
 
@@ -210,18 +238,32 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
     twr50   = traj['twr50']
     n       = len(times)
 
+    # Navigation mode (U): the 50 km circle belongs on target B, not the
+    # station — dist_km / in_radius are relative to B.
+    ctr_lat = traj.get('target_lat')
+    ctr_lon = traj.get('target_lon')
+    is_nav = (ctr_lat is not None and
+              (abs(ctr_lat - STATION_LAT) > 1e-9 or abs(ctr_lon - STATION_LON) > 1e-9))
+    if ctr_lat is None:
+        ctr_lat, ctr_lon = STATION_LAT, STATION_LON
+
     r_lat = m_to_deg_lat(STATION_RADIUS_M)
     r_lon = m_to_deg_lon(STATION_RADIUS_M)
     theta = np.linspace(0, 2 * math.pi, 300)
-    circ_lat = STATION_LAT + r_lat * np.sin(theta)
-    circ_lon = STATION_LON + r_lon * np.cos(theta)
+    circ_lat = ctr_lat + r_lat * np.sin(theta)
+    circ_lon = ctr_lon + r_lon * np.cos(theta)
 
-    traj_lon_dev = max(abs(lons - STATION_LON).max(), r_lon * 1.5) + r_lon * 0.4
-    traj_lat_dev = max(abs(lats - STATION_LAT).max(), r_lat * 1.5) + r_lat * 0.4
-    lon_lo = STATION_LON - traj_lon_dev
-    lon_hi = STATION_LON + traj_lon_dev
-    lat_lo = STATION_LAT - traj_lat_dev
-    lat_hi = STATION_LAT + traj_lat_dev
+    lon_pts_dev = abs(lons - ctr_lon).max()
+    lat_pts_dev = abs(lats - ctr_lat).max()
+    if is_nav:   # keep station A in frame too
+        lon_pts_dev = max(lon_pts_dev, abs(STATION_LON - ctr_lon) + r_lon * 0.3)
+        lat_pts_dev = max(lat_pts_dev, abs(STATION_LAT - ctr_lat) + r_lat * 0.3)
+    traj_lon_dev = max(lon_pts_dev, r_lon * 1.5) + r_lon * 0.4
+    traj_lat_dev = max(lat_pts_dev, r_lat * 1.5) + r_lat * 0.4
+    lon_lo = ctr_lon - traj_lon_dev
+    lon_hi = ctr_lon + traj_lon_dev
+    lat_lo = ctr_lat - traj_lat_dev
+    lat_hi = ctr_lat + traj_lat_dev
 
     reward_roll = np.convolve(rewards, np.ones(12) / 12, mode='same')
     tail_len = 60
@@ -251,15 +293,20 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
     for mult in [3, 5, 10]:
         rm = STATION_RADIUS_M * mult
         rl, rn = m_to_deg_lat(rm), m_to_deg_lon(rm)
-        ax_map.plot(STATION_LON + rn * np.cos(theta), STATION_LAT + rl * np.sin(theta),
+        ax_map.plot(ctr_lon + rn * np.cos(theta), ctr_lat + rl * np.sin(theta),
                     color='#1e1e33', lw=0.5, ls=':', zorder=0)
-    ax_map.plot(STATION_LON, STATION_LAT, '*', color='white', ms=9, zorder=4, alpha=0.9)
+    ax_map.plot(ctr_lon, ctr_lat, '*', color='white', ms=9, zorder=4, alpha=0.9)
+    if is_nav:   # mark the spawn station A alongside target B
+        ax_map.plot(STATION_LON, STATION_LAT, '^', color='#9b59b6', ms=8, zorder=4, alpha=0.9)
     ax_map.set_xlim(lon_lo, lon_hi)
     ax_map.set_ylim(lat_lo, lat_hi)
     ax_map.set_aspect('equal', adjustable='box')
     ax_map.set_xlabel('Longitude (°)', color='#888899', fontsize=8)
     ax_map.set_ylabel('Latitude (°)', color='#888899', fontsize=8)
-    ax_map.set_title('Balloon position  (★=station, dashed=50 km radius)', color='white', fontsize=9)
+    map_title = ('Balloon position  (▲=station A, ★=target B, dashed=50 km target radius)'
+                 if is_nav else
+                 'Balloon position  (★=station, dashed=50 km radius)')
+    ax_map.set_title(map_title, color='white', fontsize=9)
 
     ax_dist.set_xlim(0, times[-1])
     ax_dist.set_ylim(0, max(dists.max() * 1.1, STATION_RADIUS_M / 1000 * 1.5))
@@ -268,7 +315,8 @@ def make_gif(traj, preset, out_path, label, stride=4, fps=12):
                          alpha=0.07, color='#2ecc71', zorder=0)
     ax_dist.set_xlabel('Time (h)', color='#888899', fontsize=7)
     ax_dist.set_ylabel('km', color='#888899', fontsize=7)
-    ax_dist.set_title('Distance from station', color='white', fontsize=8)
+    ax_dist.set_title('Distance from target B' if is_nav else 'Distance from station',
+                      color='white', fontsize=8)
 
     ax_alt.set_xlim(0, times[-1])
     ax_alt.set_ylim(ALT_BAND_LOW_M / 1000 - 0.2, ALT_BAND_HIGH_M / 1000 + 0.2)

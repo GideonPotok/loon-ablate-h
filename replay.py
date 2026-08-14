@@ -105,6 +105,27 @@ ABLATION_ENV_FLAGS = {
         'wind_param_jitter':  True,
         'domain_rand':        True,
     },
+    'u': {
+        'use_reward_fix':     True,
+        'use_shaping':        True,
+        'use_expanded_state': False,
+        'use_time_features':  False,            # oracle stays removed
+        'use_estimated_phase_features': True,   # +4 estimator features — 24-dim (from S)
+        'shaping_beta':       0.5,
+        'shaping_gamma':      0.97,
+        'terminal_twr_bonus': 50.0,
+        'shaping_linear':     False,
+        'shaping_D_max':      150_000.0,        # tau = 150 km (nav gradient, was 500)
+        # Realism bundle — same testbed as R/S/T
+        'wind_phase_jitter':  True,
+        'wind_episode_noise': True,
+        'wind_param_jitter':  True,
+        'domain_rand':        True,
+        # Navigation mode — spawn near station A, target B 100 km away
+        'use_navigation':          True,
+        'navigation_distance_km':  100.0,
+        'arrival_bonus':           25.0,
+    },
 }
 ABLATION_LABELS = {
     'k2': 'Ablation K2 (exp shaping, tau=500km)',
@@ -112,6 +133,7 @@ ABLATION_LABELS = {
     'm':  'Ablation M (option-critic + GRU-64)',
     'q':  'Ablation Q (option-critic, per-step cadence)',
     'r':  'Ablation R (realism floor, no oracle features)',
+    'u':  'Ablation U (A-to-B navigation, 100 km)',
 }
 # Architecture overrides not recoverable from the checkpoint's saved config
 # (QRAgent.state_dict() only persists the feedforward-relevant fields).
@@ -213,11 +235,16 @@ def run_episode(agent: QRAgent, preset: str, duration_s: float, seed: int,
     # Which wind this ran on. For ERA5 the cell + start time; a result without
     # it cannot be reproduced or paired against another policy.
     traj['wind'] = reset_info.get('wind', {})
+    # Navigation mode (U): the target is NOT the station — dist_m / in_radius
+    # above are relative to this point. None on v1 / station-keeping resets.
+    traj['target_lat'] = reset_info.get('target_lat')
+    traj['target_lon'] = reset_info.get('target_lon')
     return traj
 
 
 def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation H (w00)',
-                 station_lat: float | None = None, station_lon: float | None = None):
+                 station_lat: float | None = None, station_lon: float | None = None,
+                 origin_lat: float | None = None, origin_lon: float | None = None):
     color = PRESET_COLORS.get(preset, '#3498db')
     lats  = np.array(traj['lat'])
     lons  = np.array(traj['lon'])
@@ -251,7 +278,11 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
     def _draw_map(ax, xlim, ylim, title):
         ax.fill(circ_lon, circ_lat, alpha=0.12, color=color, zorder=0)
         ax.plot(circ_lon, circ_lat, color=color, lw=1.2, ls='--', zorder=1)
-        ax.plot(st_lon, st_lat, '*', color=color, ms=12, zorder=3)
+        ax.plot(st_lon, st_lat, '*', color=color, ms=12, zorder=3,
+                label='target B' if origin_lat is not None else None)
+        if origin_lat is not None:   # navigation mode: A (spawn origin) ≠ B (target)
+            ax.plot(origin_lon, origin_lat, '^', color='#8e44ad', ms=9, zorder=3,
+                    label='station A')
 
         points = np.array([lons, lats]).T.reshape(-1, 1, 2)
         segs   = np.concatenate([points[:-1], points[1:]], axis=1)
@@ -268,9 +299,14 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
         ax.set_ylabel('Latitude (°)', fontsize=9)
         ax.set_title(title, fontsize=9)
 
-    # zoomed-out: whole trajectory + 12% padding
-    lon_dev_out = max(np.abs(lons - st_lon).max(), r_lon * 1.2) * 1.12
-    lat_dev_out = max(np.abs(lats - st_lat).max(), r_lat * 1.2) * 1.12
+    # zoomed-out: whole trajectory + 12% padding (+ station A in navigation mode)
+    lon_pts_dev = np.abs(lons - st_lon).max()
+    lat_pts_dev = np.abs(lats - st_lat).max()
+    if origin_lon is not None:
+        lon_pts_dev = max(lon_pts_dev, abs(origin_lon - st_lon) + r_lon * 0.3)
+        lat_pts_dev = max(lat_pts_dev, abs(origin_lat - st_lat) + r_lat * 0.3)
+    lon_dev_out = max(lon_pts_dev, r_lon * 1.2) * 1.12
+    lat_dev_out = max(lat_pts_dev, r_lat * 1.2) * 1.12
     ax_map_out = fig.add_subplot(gs[0, 0])
     _draw_map(ax_map_out,
               (st_lon - lon_dev_out, st_lon + lon_dev_out),
@@ -278,7 +314,8 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
               'Full trajectory (zoomed out)\n(green = in radius, red = out)')
     ax_map_out.legend(fontsize=7, loc='upper right')
 
-    # zoomed-in: fixed view centered on the station, ~1.7x radius
+    # zoomed-in: fixed view centered on the station (target B in nav mode), ~1.7x radius
+    near_what = 'target B' if origin_lat is not None else 'station'
     ZOOM_IN_MULT = 1.7
     lon_dev_in = r_lon * ZOOM_IN_MULT
     lat_dev_in = r_lat * ZOOM_IN_MULT
@@ -286,7 +323,7 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
     _draw_map(ax_map_in,
               (st_lon - lon_dev_in, st_lon + lon_dev_in),
               (st_lat - lat_dev_in, st_lat + lat_dev_in),
-              'Near station (zoomed in)\n(green = in radius, red = out)')
+              f'Near {near_what} (zoomed in)\n(green = in radius, red = out)')
 
     # ── Panel 2: altitude vs time ─────────────────────────────────────────────
     ax_alt = fig.add_subplot(gs[0, 1])
@@ -304,7 +341,7 @@ def plot_episode(traj: dict, preset: str, out_path: Path, label: str = 'Ablation
     ax_dist.axhline(STATION_RADIUS_M / 1000, color='gray', lw=1.0, ls='--', label='50 km radius')
     ax_dist.fill_between(times, 0, STATION_RADIUS_M / 1000, alpha=0.08, color='#2ecc71')
     ax_dist.set_xlabel('Time (h)', fontsize=9)
-    ax_dist.set_ylabel('Distance from station (km)', fontsize=9)
+    ax_dist.set_ylabel(f'Distance from {near_what} (km)', fontsize=9)
     ax_dist.set_title('Distance over time', fontsize=9)
     ax_dist.legend(fontsize=7)
 
@@ -391,7 +428,14 @@ def main():
                            server_version=server_version, flags=flags)
         print(f'  TWR50 = {traj["twr50"]*100:.1f}%  steps = {traj["n_steps"]}')
         out = Path(f'{out_prefix}_{preset.replace("-","_")}.png')
-        plot_episode(traj, preset, out, label=label)
+        # Navigation mode: centre the radius circle on target B and mark the
+        # spawn station A — dist_m/in_radius are relative to B, not the station.
+        is_nav = bool((flags or {}).get('use_navigation'))
+        plot_episode(traj, preset, out, label=label,
+                     station_lat=traj['target_lat'] if is_nav else None,
+                     station_lon=traj['target_lon'] if is_nav else None,
+                     origin_lat=STATION_LAT if is_nav else None,
+                     origin_lon=STATION_LON if is_nav else None)
 
     print('\nDone.')
 
